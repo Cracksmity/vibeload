@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+import shutil
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
@@ -8,9 +9,22 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QFileDialog,
     QTextEdit, QProgressBar, QComboBox
 )
+from PySide6.QtGui import QIcon
 
 from yt_dlp import YoutubeDL
 
+# -------- RESOURSE PATH --------
+def resource_path(relative_name: str) -> str:
+    # PyInstaller: los archivos se extraen en una carpeta temporal _MEIPASS
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_name)
+    # Modo normal .py
+    return os.path.join(os.path.dirname(__file__), relative_name)
+
+
+# --------- CHECK TOOLS --------
+def check_tool(tool_name):
+    return shutil.which(tool_name) is not None
 
 # ---------- LÓGICA DE DESCARGA Y CONVERSIÓN ----------
 
@@ -23,8 +37,7 @@ def descargar_video_whatsapp(url, carpeta_salida, logger=print):
     os.makedirs(carpeta_salida, exist_ok=True)
 
     ydl_opts = {
-        "outtmpl": os.path.join(carpeta_salida, "%(title)s.%(ext)s"),
-        # Mejor video+audio fusionado a mp4
+        "outtmpl": os.path.join(carpeta_salida, "%(id)s.%(ext)s"),
         "format": "bv*+ba/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -231,11 +244,43 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
+        self.setWindowIcon(QIcon(resource_path("icono.ico")))
+        # 📁 Carpetas por defecto según el modo
+        user_home = os.path.expanduser("~")
+        self.default_dirs = {
+            "WhatsApp 720p": r"D:\MemesWhasap",
+            "Máxima calidad (video)": r"D:\VideosHD",
+            "Solo audio (MP3)": os.path.join(user_home, "Music"),
+        }
+
         self.setWindowTitle("VibeLoader ✨ (yt-dlp + HandBrake)")
         self.setMinimumSize(700, 500)
+
+        # Construir UI una sola vez
         self._build_ui()
         self._apply_styles()
 
+        # ✅ Check de herramientas al iniciar
+        self.log("🔎 Verificando herramientas...")
+
+        tools = ["ffmpeg", "ffprobe", "HandBrakeCLI"]
+        for t in tools:
+            ok = check_tool(t)
+            self.log(f"{'✅' if ok else '❌'} {t}: {'OK' if ok else 'NO encontrado en PATH'}")
+
+        if not check_tool("ffmpeg") or not check_tool("ffprobe"):
+            self.log("⚠️ Para 'Solo audio (MP3)' necesitas ffmpeg + ffprobe en el PATH.")
+
+        if not check_tool("HandBrakeCLI"):
+            self.log("⚠️ Para 'WhatsApp 720p' necesitas HandBrakeCLI en el PATH.")
+
+        # 🔗 Conectar cambio de modo a actualización de carpeta
+        self.preset_combo.currentTextChanged.connect(self.on_preset_changed)
+
+        # ✅ Poner carpeta por defecto del modo inicial
+        self.on_preset_changed(self.preset_combo.currentText())
+
+        # Hilo/worker
         self.thread = None
         self.worker = None
 
@@ -307,7 +352,7 @@ class MainWindow(QWidget):
         self.setLayout(layout)
 
     def _apply_styles(self):
-        # Tema oscuro sencillo con algo de vibra
+
         self.setStyleSheet("""
             QWidget {
                 background-color: #101018;
@@ -355,6 +400,24 @@ class MainWindow(QWidget):
                 color: #b2bec3;
             }
         """)
+
+    def on_preset_changed(self, modo):
+        """
+        Cuando el usuario cambia el modo (WhatsApp / HD / MP3),
+        se propone una carpeta por defecto.
+        """
+        default_dir = self.default_dirs.get(modo)
+
+        if not default_dir:
+            return
+
+        # Si no hay nada escrito, siempre ponemos la carpeta por defecto
+        if not self.out_edit.text().strip():
+            self.out_edit.setText(default_dir)
+            return
+
+        # Si quieres que SIEMPRE cambie, aunque ya haya una carpeta, usa:
+        # self.out_edit.setText(default_dir)
 
     def log(self, text):
         self.log_box.append(text)

@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import download_range_func  # <-- NUEVO IMPORT
+
 
 # -------- RESOURSE PATH --------
 def resource_path(relative_name: str) -> str:
@@ -26,9 +28,49 @@ def resource_path(relative_name: str) -> str:
 def check_tool(tool_name):
     return shutil.which(tool_name) is not None
 
+
+# -------- HELPER PARA TIEMPOS --------
+def parse_time(t_str):
+    """Convierte un string 'MM:SS' o 'HH:MM:SS' a segundos totales."""
+    if not t_str or not t_str.strip():
+        return None
+    try:
+        parts = [float(p) for p in t_str.strip().split(':')]
+        if len(parts) == 1: return parts[0]
+        if len(parts) == 2: return parts[0] * 60 + parts[1]
+        if len(parts) == 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except ValueError:
+        return None
+    return None
+
+
+def aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger):
+    """Aplica la configuración de recorte a las opciones de yt-dlp si el usuario ingresó tiempos."""
+    start_sec = parse_time(start_time)
+    end_sec = parse_time(end_time)
+
+    if start_sec is not None or end_sec is not None:
+        s = start_sec if start_sec is not None else 0
+        e = end_sec if end_sec is not None else float('inf')
+
+        ydl_opts['download_ranges'] = download_range_func(None, [(s, e)])
+
+        # 🛠️ SOLUCIÓN AL COLAPSO DE FFMPEG (BLOQUEO DE YOUTUBE)
+        # Fuerza a yt-dlp a usar un cliente web tradicional para evitar que
+        # YouTube bloquee la descarga directa de fragmentos.
+        if 'extractor_args' not in ydl_opts:
+            ydl_opts['extractor_args'] = {}
+        ydl_opts['extractor_args']['youtube'] = ['player_client=default,-android_sdkless']
+
+        texto_fin = e if e != float('inf') else 'el final'
+        logger(f"✂️ Fragmento configurado: de {s}s hasta {texto_fin}s (Corte por Keyframe)")
+
+    return ydl_opts
+
+
 # ---------- LÓGICA DE DESCARGA Y CONVERSIÓN ----------
 
-def descargar_video_whatsapp(url, carpeta_salida, logger=print):
+def descargar_video_whatsapp(url, carpeta_salida, start_time=None, end_time=None, logger=print):
     """
     Descarga el video usando yt_dlp y regresa la ruta del archivo resultante.
     Pensado para luego pasarlo por HandBrake y hacerlo más compatible.
@@ -42,6 +84,8 @@ def descargar_video_whatsapp(url, carpeta_salida, logger=print):
         "merge_output_format": "mp4",
         "noplaylist": True,
     }
+
+    ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -58,7 +102,7 @@ def descargar_video_whatsapp(url, carpeta_salida, logger=print):
     return final_path
 
 
-def descargar_video_max_calidad(url, carpeta_salida, logger=print):
+def descargar_video_max_calidad(url, carpeta_salida, start_time=None, end_time=None, logger=print):
     """
     Descarga el video en la mejor calidad disponible.
     NO se recomprime: ideal para ver en PC / TV, no necesariamente para WhatsApp.
@@ -68,10 +112,11 @@ def descargar_video_max_calidad(url, carpeta_salida, logger=print):
 
     ydl_opts = {
         "outtmpl": os.path.join(carpeta_salida, "%(title)s.%(ext)s"),
-        # Máxima calidad posible (vídeo + audio)
         "format": "bv*+ba/bestvideo+bestaudio/best",
         "noplaylist": True,
     }
+
+    ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -81,7 +126,7 @@ def descargar_video_max_calidad(url, carpeta_salida, logger=print):
     return filename
 
 
-def descargar_audio_mp3(url, carpeta_salida, logger=print):
+def descargar_audio_mp3(url, carpeta_salida, start_time=None, end_time=None, logger=print):
     logger("🎧 Iniciando descarga de solo audio (MP3) con metadatos + cover...")
     os.makedirs(carpeta_salida, exist_ok=True)
 
@@ -105,6 +150,8 @@ def descargar_audio_mp3(url, carpeta_salida, logger=print):
         ],
     }
 
+    ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
@@ -114,11 +161,10 @@ def descargar_audio_mp3(url, carpeta_salida, logger=print):
 
     # 🧹 LIMPIEZA: borrar original + miniaturas
     posibles_sobrantes = [
-        filename,              # audio original (webm, m4a, etc.)
-        base + ".webp",        # miniatura original
-        base + ".jpg",         # miniatura convertida
+        filename,
+        base + ".webp",
+        base + ".jpg",
     ]
-
 
     for f in posibles_sobrantes:
         if f.endswith(".mp3"):
@@ -141,31 +187,23 @@ def convertir_con_handbrake(input_file, output_file, logger=print):
     """
     logger("🔥 Iniciando conversión con HandBrakeCLI...")
 
-    # Si usas ruta absoluta, cámbiala aquí:
-    # HANDBRAKE_CLI = r"C:\Tools\HandBrakeCLI\HandBrakeCLI.exe"
-    # cmd = [HANDBRAKE_CLI, ...]
     cmd = [
         "HandBrakeCLI",
         "-i", input_file,
         "-o", output_file,
-        # Vídeo
-        "-e", "x264",        # codec de video H.264
-        "-q", "22",          # calidad (20~24 está decente)
-        "--optimize",        # para mejor compatibilidad/stream
-        # Audio
-        "-E", "av_aac",      # codec de audio AAC
-        "-B", "128",         # bitrate de audio
-        # Ejemplo para limitar resolución si quieres:
-        # "--maxWidth", "1280",
-        # "--maxHeight", "720",
+        "-e", "x264",
+        "-q", "22",
+        "--optimize",
+        "-E", "av_aac",
+        "-B", "128",
     ]
 
     try:
         subprocess.run(cmd, check=True)
         logger(f"✅ Conversión terminada: {output_file}")
     except FileNotFoundError:
-        logger("❌ Error: No se encontró 'HandBrakeCLI'. "
-               "Asegúrate de tener instalado HandBrakeCLI y que el comando funcione en tu terminal.")
+        logger(
+            "❌ Error: No se encontró 'HandBrakeCLI'. Asegúrate de tener instalado HandBrakeCLI y que el comando funcione en tu terminal.")
         raise
     except subprocess.CalledProcessError as e:
         logger(f"❌ Error al ejecutar HandBrakeCLI: {e}")
@@ -179,11 +217,13 @@ class Worker(QObject):
     error = Signal(str)
     log = Signal(str)
 
-    def __init__(self, url, carpeta_salida, preset):
+    def __init__(self, url, carpeta_salida, preset, start_time, end_time):
         super().__init__()
         self.url = url
         self.carpeta_salida = carpeta_salida
         self.preset = preset
+        self.start_time = start_time
+        self.end_time = end_time
 
     @Slot()
     def run(self):
@@ -197,14 +237,11 @@ class Worker(QObject):
 
             if self.preset == "WhatsApp 720p":
                 logger("🎯 Modo: WhatsApp 720p (descarga + conversión).")
-                # 1) Descargar base mp4
-                input_file = descargar_video_whatsapp(self.url, self.carpeta_salida, logger=logger)
-                # 2) Definir salida convertida
+                input_file = descargar_video_whatsapp(self.url, self.carpeta_salida, self.start_time, self.end_time,
+                                                      logger=logger)
                 base, _ = os.path.splitext(input_file)
                 output_file = base + "_whatsapp.mp4"
-                # 3) Convertir con HandBrake
                 convertir_con_handbrake(input_file, output_file, logger=logger)
-                # 🔥 Borrar el archivo original
 
                 try:
                     if os.path.exists(input_file):
@@ -216,17 +253,19 @@ class Worker(QObject):
 
             elif self.preset == "Máxima calidad (video)":
                 logger("🎯 Modo: Máxima calidad (solo descarga, sin recomprimir).")
-                descargar_video_max_calidad(self.url, self.carpeta_salida, logger=logger)
+                descargar_video_max_calidad(self.url, self.carpeta_salida, self.start_time, self.end_time,
+                                            logger=logger)
                 logger("✨ Listo. Video descargado en la mejor calidad disponible.")
 
             elif self.preset == "Solo audio (MP3)":
                 logger("🎯 Modo: Solo audio (MP3).")
-                descargar_audio_mp3(self.url, self.carpeta_salida, logger=logger)
+                descargar_audio_mp3(self.url, self.carpeta_salida, self.start_time, self.end_time, logger=logger)
                 logger("✨ Listo. Audio MP3 descargado.")
 
             else:
                 logger("⚠️ Preset no reconocido, usando modo WhatsApp por defecto.")
-                input_file = descargar_video_whatsapp(self.url, self.carpeta_salida, logger=logger)
+                input_file = descargar_video_whatsapp(self.url, self.carpeta_salida, self.start_time, self.end_time,
+                                                      logger=logger)
                 base, _ = os.path.splitext(input_file)
                 output_file = base + "_whatsapp.mp4"
                 convertir_con_handbrake(input_file, output_file, logger=logger)
@@ -245,7 +284,6 @@ class MainWindow(QWidget):
         super().__init__()
 
         self.setWindowIcon(QIcon(resource_path("icono.ico")))
-        # 📁 Carpetas por defecto según el modo
         user_home = os.path.expanduser("~")
         self.default_dirs = {
             "WhatsApp 720p": r"D:\MemesWhasap",
@@ -256,11 +294,9 @@ class MainWindow(QWidget):
         self.setWindowTitle("VibeLoader ✨ (yt-dlp + HandBrake)")
         self.setMinimumSize(700, 500)
 
-        # Construir UI una sola vez
         self._build_ui()
         self._apply_styles()
 
-        # ✅ Check de herramientas al iniciar
         self.log("🔎 Verificando herramientas...")
 
         tools = ["ffmpeg", "ffprobe", "HandBrakeCLI"]
@@ -269,18 +305,14 @@ class MainWindow(QWidget):
             self.log(f"{'✅' if ok else '❌'} {t}: {'OK' if ok else 'NO encontrado en PATH'}")
 
         if not check_tool("ffmpeg") or not check_tool("ffprobe"):
-            self.log("⚠️ Para 'Solo audio (MP3)' necesitas ffmpeg + ffprobe en el PATH.")
+            self.log("⚠️ Para 'Solo audio (MP3)' y recortes necesitas ffmpeg + ffprobe en el PATH.")
 
         if not check_tool("HandBrakeCLI"):
             self.log("⚠️ Para 'WhatsApp 720p' necesitas HandBrakeCLI en el PATH.")
 
-        # 🔗 Conectar cambio de modo a actualización de carpeta
         self.preset_combo.currentTextChanged.connect(self.on_preset_changed)
-
-        # ✅ Poner carpeta por defecto del modo inicial
         self.on_preset_changed(self.preset_combo.currentText())
 
-        # Hilo/worker
         self.thread = None
         self.worker = None
 
@@ -303,6 +335,24 @@ class MainWindow(QWidget):
         self.url_edit.setPlaceholderText("Pega aquí la URL de YouTube / etc...")
         url_layout.addWidget(url_label)
         url_layout.addWidget(self.url_edit)
+
+        # Tiempos de recorte
+        time_layout = QHBoxLayout()
+        time_label = QLabel("Recortar (opcional):")
+
+        self.start_edit = QLineEdit()
+        self.start_edit.setPlaceholderText("Inicio (ej. 0:45)")
+        self.start_edit.setFixedWidth(110)
+
+        self.end_edit = QLineEdit()
+        self.end_edit.setPlaceholderText("Fin (ej. 1:30)")
+        self.end_edit.setFixedWidth(110)
+
+        time_layout.addWidget(time_label)
+        time_layout.addWidget(self.start_edit)
+        time_layout.addWidget(QLabel(" a "))
+        time_layout.addWidget(self.end_edit)
+        time_layout.addStretch()
 
         # Carpeta salida
         out_layout = QHBoxLayout()
@@ -343,6 +393,7 @@ class MainWindow(QWidget):
         self.log_box.setPlaceholderText("Aquí irán apareciendo los logs con la vibra del proceso...")
 
         layout.addLayout(url_layout)
+        layout.addLayout(time_layout)
         layout.addLayout(out_layout)
         layout.addLayout(preset_layout)
         layout.addWidget(self.start_btn)
@@ -352,7 +403,6 @@ class MainWindow(QWidget):
         self.setLayout(layout)
 
     def _apply_styles(self):
-
         self.setStyleSheet("""
             QWidget {
                 background-color: #101018;
@@ -402,22 +452,14 @@ class MainWindow(QWidget):
         """)
 
     def on_preset_changed(self, modo):
-        """
-        Cuando el usuario cambia el modo (WhatsApp / HD / MP3),
-        se propone una carpeta por defecto.
-        """
         default_dir = self.default_dirs.get(modo)
 
         if not default_dir:
             return
 
-        # Si no hay nada escrito, siempre ponemos la carpeta por defecto
         if not self.out_edit.text().strip():
             self.out_edit.setText(default_dir)
             return
-
-        # Si quieres que SIEMPRE cambie, aunque ya haya una carpeta, usa:
-        # self.out_edit.setText(default_dir)
 
     def log(self, text):
         self.log_box.append(text)
@@ -431,6 +473,8 @@ class MainWindow(QWidget):
         url = self.url_edit.text().strip()
         carpeta = self.out_edit.text().strip()
         preset = self.preset_combo.currentText()
+        start_t = self.start_edit.text().strip()
+        end_t = self.end_edit.text().strip()
 
         if not url:
             self.log("⚠️ Por favor, escribe/pega una URL.")
@@ -440,23 +484,19 @@ class MainWindow(QWidget):
             self.log("⚠️ Por favor, elige una carpeta de salida.")
             return
 
-        # Deshabilitar UI mientras trabaja
         self.start_btn.setEnabled(False)
-        self.progress.setRange(0, 0)  # modo indeterminado
+        self.progress.setRange(0, 0)
         self.progress.setFormat("Trabajando...")
 
-        # Crear worker en un hilo
         self.thread = QThread()
-        self.worker = Worker(url, carpeta, preset)
+        self.worker = Worker(url, carpeta, preset, start_t, end_t)
         self.worker.moveToThread(self.thread)
 
-        # Conexiones
         self.thread.started.connect(self.worker.run)
         self.worker.log.connect(self.log)
         self.worker.error.connect(self.on_error)
         self.worker.finished.connect(self.on_finished)
 
-        # Limpieza del hilo
         self.worker.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.thread.deleteLater)
 

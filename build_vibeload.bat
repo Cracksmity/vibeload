@@ -12,11 +12,12 @@ if exist "venv\Scripts\activate.bat" (
 echo.
 echo === Actualizando dependencias ===
 python -m pip install -U pip
-pip install -U yt-dlp PySide6 pyinstaller
+pip install -r requirements.txt
+pip install -U pyinstaller
 
 echo.
 echo === Rebuild EXE (PyInstaller) ===
-pyinstaller --onefile --noconsole --icon=icono.ico vibeload_whatsapp.py
+pyinstaller --onefile --noconsole --icon=icono.ico --add-data "icono.ico;." vibeload_whatsapp.py
 
 echo.
 echo ✅ Listo. Tu exe actualizado esta en: dist\

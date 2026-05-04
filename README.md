@@ -1,45 +1,44 @@
 # 🎧 VibeLoader ✨
 
-VibeLoader es una pequeña aplicación de escritorio para Windows escrita en Python que:
+VibeLoader es una aplicación de escritorio para Windows escrita en Python con dos vistas:
 
-- Descarga videos usando **yt-dlp**.
-- Convierte videos a un formato más **compatible con WhatsApp** usando **HandBrakeCLI**.
-- Descarga **solo audio en MP3**, con:
-  - Metadatos (título, artista, etc.).
-  - Portada embebida (miniatura del video).
-- Todo esto con una **interfaz gráfica** en **PySide6** y un toquecito *vaporwave* 😎.
+- **Modo simple** (predeterminado): pegar enlace → elegir Música, Video o Auto → descargar. Pensado para quien quiera bajar cosas sin pelearse con códecs.
+- **Modo avanzado**: la GUI clásica con presets, recortes por tiempo, carpeta de salida y log detallado.
+
+Internamente usa **yt-dlp** para descargar y **ffmpeg** para convertir. La música se guarda en MP3 con metadatos y portada embebida.
 
 ---
 
 ## 🚀 Características
 
-- **Interfaz gráfica (GUI)** con tema oscuro.
+- **Interfaz gráfica (PySide6)** con tema claro/oscuro y botones grandes accesibles.
 
-- Tres modos de descarga:
-  
-  1. `WhatsApp 720p`  
-     
-     - Descarga el video.
-     - Lo convierte a H.264 + AAC vía HandBrakeCLI.
-     - Deja solo el archivo final `*_whatsapp.mp4`, ideal para compartir por WhatsApp.
-  
-  2. `Máxima calidad (video)`  
-     
-     - Descarga el mejor video disponible (video + audio).
-     - No recomprime ni convierte: conserva la mayor calidad posible.
-  
-  3. `Solo audio (MP3)`  
-     
-     - Descarga solo el audio.
-     - Convierte a MP3 (usando ffmpeg a través de yt-dlp).
-     - Descarga la miniatura, la convierte y la incrusta como **portada** en el MP3.
-     - Limpia archivos temporales, dejando solo el `.mp3` final.
+- **Modo simple** (recomendado para uso diario): tres botones grandes:
+  - **Descargar Música** → MP3 192 kbps con metadatos y portada.
+  - **Descargar Video** → MP4 hasta 1080p (sin recompresión, calidad original).
+  - **Modo Auto** → MP4 720p H.264 **Baseline @ L3.1**, AAC LC 128 kbps a 44.1 kHz, `+faststart`. Pensado para autoestéreos y reproductores antiguos donde códecs nuevos o resoluciones altas dan problemas. El archivo final se llama con el **título del video y espacios** (caracteres no válidos en Windows se quitan); si ya existía otro archivo con el mismo nombre, se añade el **id del video** entre corchetes: `Mi canción favorita [dQw4w9WgXcQ].mp4`.
 
-- Limpieza automática de archivos intermedios (miniaturas y audio original).
+- **Modo avanzado**, con cuatro presets:
+  - `WhatsApp 720p` → recompresión H.264 Main@L4.0 + AAC, máx. 1280×720, 30 fps, yuv420p, +faststart. El archivo final se guarda solo con el **id del video** (por ejemplo `dQw4w9WgXcQ.mp4`), sin sufijo `_whatsapp`.
+  - `Máxima calidad (video)` → mejor calidad disponible, sin recomprimir.
+  - `Solo audio (MP3)` → MP3 192 kbps con portada embebida.
+  - `Modo Auto (autoestéreo)` → mismo perfil que el botón Auto del modo simple.
+  - Recorte opcional por tiempo (`MM:SS`, `HH:MM:SS`, `90s`, `1m30s`).
 
-- Barra de progreso indeterminada mientras se ejecutan las tareas en segundo plano.
+- **Calidad de vida**:
+  - Detección automática de URL en el portapapeles al activar la ventana.
+  - Vista previa con miniatura, título, canal y duración antes de descargar.
+  - Drag & drop de URLs sobre la ventana.
+  - Lista de **enlaces recientes** (últimos 5).
+  - Botón **Abrir carpeta** y **Abrir archivo** al terminar.
+  - **Notificaciones del sistema** cuando la descarga termina y la ventana no está enfocada.
+  - **Botón cancelar** durante descarga o conversión.
+  - **Errores amigables**: traduce los mensajes técnicos comunes a español plano.
+  - **Tema claro/oscuro** persistido entre sesiones.
+  - **Carpetas predeterminadas** por modo, configurables en la primera ejecución.
+  - Auto-actualización opcional de yt-dlp en segundo plano (deshabilitada por defecto).
 
-- Logs en tiempo real dentro de la ventana.
+- Logs detallados en `%LOCALAPPDATA%\VibeLoader\vibeload.log`.
 
 ---
 
@@ -48,8 +47,7 @@ VibeLoader es una pequeña aplicación de escritorio para Windows escrita en Pyt
 - **Python 3**
 - PySide6 – GUI
 - yt-dlp – descargas de video/audio
-- HandBrakeCLI – conversión de video a MP4 compatible
-- ffmpeg – conversión de audio y manejo de miniaturas (usado por yt-dlp)
+- ffmpeg / ffprobe – conversión de video WhatsApp, audio MP3 y miniaturas (usado por yt-dlp)
 
 ---
 
@@ -57,23 +55,13 @@ VibeLoader es una pequeña aplicación de escritorio para Windows escrita en Pyt
 
 1. **Python 3.10+** (recomendado)
 
-2. Paquetes de Python:
+2. Paquetes de Python (recomendado usar el archivo del repo):
    
    ```bash
-   pip install yt-dlp PySide6
+   pip install -r requirements.txt
    ```
 
-3. **HandBrakeCLI** instalado y accesible en el `PATH`:
-   
-   - En Windows normalmente se instala junto con HandBrake o como binario separado.
-   
-   - Verifica en consola:
-     
-     ```bat
-     HandBrakeCLI --version
-     ```
-
-4. **ffmpeg** y **ffprobe** en el `PATH` (para el modo MP3 con portada):
+3. **ffmpeg** y **ffprobe** en el `PATH` (obligatorio para todos los modos):
    
    ```bat
    ffmpeg -version
@@ -84,10 +72,10 @@ VibeLoader es una pequeña aplicación de escritorio para Windows escrita en Pyt
 
 ## 🛠 Instalación (modo desarrollo)
 
-1. Clonar el repositorio (ajusta TU_USUARIO y el nombre del repo si lo necesitas):
+1. Clonar el repositorio:
    
    ```bash
-   git clone https://github.com/TU_USUARIO/vibeload.git
+   git clone https://github.com/Cracksmity/vibeload
    cd vibeload
    ```
 
@@ -95,16 +83,16 @@ VibeLoader es una pequeña aplicación de escritorio para Windows escrita en Pyt
    
    ```bash
    python -m venv venv
-   venv\Scriptsctivate
+   venv\Scripts\activate
    ```
 
 3. Instalar dependencias:
    
    ```bash
-   pip install yt-dlp PySide6
+   pip install -r requirements.txt
    ```
 
-4. Verificar que `HandBrakeCLI`, `ffmpeg` y `ffprobe` funcionen en la consola.
+4. Verificar que `ffmpeg` y `ffprobe` funcionen en la consola.
 
 ---
 
@@ -116,21 +104,22 @@ Dentro de la carpeta del proyecto:
 python vibeload_whatsapp.py
 ```
 
-Se abrirá la ventana de VibeLoader:
+La primera vez se abre un asistente para configurar las carpetas predeterminadas (Música, Video, WhatsApp y Auto). Luego, en el **modo simple** basta con:
 
-1. **URL del video**: pega el enlace (YouTube, etc.).
-2. **Carpeta de salida**: elige dónde quieres guardar los archivos.
-3. **Modo**:
-   - `WhatsApp 720p`
-   - `Máxima calidad (video)`
-   - `Solo audio (MP3)`
-4. Clic en **“Descargar 🚀”** y espera a que el log indique que terminó.
+1. Pegar el enlace (o esperar a que VibeLoader lo detecte del portapapeles).
+2. Tocar uno de los tres botones grandes:
+   - **Descargar Música** (MP3 con portada)
+   - **Descargar Video** (MP4 hasta 1080p)
+   - **Modo Auto** (MP4 720p compatible con autoestéreos)
+3. Cuando termine, usar **Abrir carpeta** o **Abrir archivo**.
+
+El **modo avanzado** se abre desde el botón superior derecho y expone los cuatro presets, recortes por tiempo, carpeta de salida personalizada y log detallado.
 
 ---
 
 ## 🧱 Generar el .exe (PyInstaller)
 
-El proyecto puede usar un script de ayuda `build_vibeload.bat` (opcional).
+El proyecto incluye `build_vibeload.bat`. **Para generar el .exe con icono:** abre la carpeta del proyecto en el Explorador de archivos, haz doble clic en `build_vibeload.bat` (o ejecútalo desde `cmd` en esa carpeta). El script actualiza dependencias, instala PyInstaller si hace falta, y deja el ejecutable en `dist\`. Necesitas **Python y ffmpeg** instalados como en desarrollo; el `.exe` no empaqueta ffmpeg.
 
 ### 1. Instala PyInstaller
 
@@ -143,7 +132,7 @@ pip install pyinstaller
 Ejemplo de comando:
 
 ```bash
-pyinstaller --onefile --noconsole --icon=vibeload_icon.ico vibeload_whatsapp.py
+pyinstaller --onefile --noconsole --icon=icono.ico --add-data "icono.ico;." vibeload_whatsapp.py
 ```
 
 - El ejecutable quedará en la carpeta `dist/` como algo tipo:
@@ -152,7 +141,7 @@ pyinstaller --onefile --noconsole --icon=vibeload_icon.ico vibeload_whatsapp.py
   dist/vibeload_whatsapp.exe
   ```
 
-> Nota: El `.exe` **no incluye** HandBrakeCLI ni ffmpeg; deben estar instalados en el sistema.
+> Nota: El `.exe` **no incluye** ffmpeg; debe estar instalado y en el `PATH`.
 
 ---
 
@@ -182,11 +171,6 @@ dist/
 
 ## 🐛 Problemas comunes
 
-- **Error: `'HandBrakeCLI' no se reconoce como comando`**
-  
-  - No está instalado o no está en el `PATH`.
-  - Solución: instalar HandBrakeCLI y agregar la carpeta donde está `HandBrakeCLI.exe` al PATH, o usar ruta absoluta en el código.
-
 - **Error al convertir a MP3 / portada no se embebe**
   
   - Normalmente es por falta de `ffmpeg` o `ffprobe`.
@@ -201,17 +185,15 @@ dist/
 
 ## 📝 To-Do / ideas futuras
 
-- Barra de progreso más precisa (porcentaje real).
 - Soporte para descargar playlists completas.
-- Configuración guardada en un archivo (última carpeta usada, modo favorito, etc.).
-- Soporte para otros presets (Telegram, Instagram Stories, etc.).
+- Más presets compatibles (Telegram, Instagram Stories, etc.).
+- Tests automatizados con pytest para los helpers (`parse_time`, `friendly`, `looks_like_supported_url`).
 
 ---
 
 ## 📄 Licencia
 
-Este proyecto se distribuye bajo la licencia **MIT**.
-Puedes modificar este texto si eliges otra licencia.
+Este proyecto está bajo la Licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más detalles.
 
 ---
 

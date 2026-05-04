@@ -145,30 +145,6 @@ pyinstaller --onefile --noconsole --icon=icono.ico --add-data "icono.ico;." vibe
 
 ---
 
-## 🧹 Archivos que NO se suben a Git
-
-Ejemplo de `.gitignore` recomendado:
-
-```gitignore
-# Python
-__pycache__/
-*.pyc
-
-# Entorno virtual
-venv/
-.env/
-
-# PyInstaller
-build/
-dist/
-*.spec
-
-# PyCharm
-.idea/
-```
-
----
-
 ## 🐛 Problemas comunes
 
 - **Error al convertir a MP3 / portada no se embebe**

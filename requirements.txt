@@ -1,2 +1,5 @@
 yt-dlp>=2024.1.0
+# yt-dlp solo soporta curl-cffi 0.5.10 y 0.10.x a 0.14.x.
+# En tu caso se instaló 0.15.0, y por eso el target de impersonation queda "no disponible".
+curl-cffi>=0.14.0,<0.15.0
 PySide6>=6.5.0

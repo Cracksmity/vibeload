@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+from urllib.parse import urlparse
 
 from PySide6.QtCore import (
     Qt,
@@ -39,11 +40,16 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSystemTrayIcon,
     QMenu,
+    QSplashScreen,
 )
-from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QAction, QGuiApplication
-
-from yt_dlp import YoutubeDL
-from yt_dlp.utils import download_range_func
+from PySide6.QtGui import (
+    QIcon,
+    QImage,
+    QPixmap,
+    QDesktopServices,
+    QAction,
+    QGuiApplication,
+)
 
 
 # ============================================================
@@ -53,6 +59,122 @@ from yt_dlp.utils import download_range_func
 SETTINGS_ORG = "VibeLoader"
 SETTINGS_APP = "VibeLoader"
 APP_VERSION = "2.0"
+
+# Cabeceras tipo navegador (YouTube / CDNs suelen bloquear User-Agent genérico de Python)
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+
+# Facebook / Meta: workaround yt-dlp "Cannot parse data" (#15161) vía TLS impersonation.
+META_YTDLP_IMPERSONATE = "chrome-99"
+
+
+def _url_hostname_lower(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_is_youtube(hostname: str) -> bool:
+    if not hostname:
+        return False
+    if hostname == "youtu.be":
+        return True
+    if hostname in ("music.youtube.com", "www.music.youtube.com"):
+        return True
+    if hostname == "youtube.com" or hostname.endswith(".youtube.com"):
+        return True
+    return False
+
+
+def _host_is_meta(hostname: str) -> bool:
+    if not hostname or _host_is_youtube(hostname):
+        return False
+    meta_suffixes = (
+        "facebook.com",
+        "fb.watch",
+        "instagram.com",
+        "threads.net",
+    )
+    for suf in meta_suffixes:
+        if hostname == suf or hostname.endswith("." + suf):
+            return True
+    return False
+
+
+def _merge_meta_impersonate_ytdlp_opts(url: str, ydl_opts: dict) -> dict:
+    """Solo dominios Meta (Facebook, Instagram, …). Nunca YouTube."""
+    if _host_is_meta(_url_hostname_lower(url)):
+        # yt-dlp valida el parámetro 'impersonate' como ImpersonateTarget
+        # (cuando el RequestHandler de curl_cffi está disponible).
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+
+            ydl_opts["impersonate"] = ImpersonateTarget.from_str(META_YTDLP_IMPERSONATE)
+        except Exception:
+            # Fallback por compatibilidad (en algunas versiones acepta string)
+            ydl_opts["impersonate"] = META_YTDLP_IMPERSONATE
+    return ydl_opts
+
+
+def _referer_for_image_url(url: str) -> str:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return "https://www.youtube.com/"
+    if "ytimg.com" in host or "ggpht.com" in host or "youtube.com" in host or "youtu.be" in host:
+        return "https://www.youtube.com/"
+    return f"https://{host}/"
+
+
+def fetch_thumbnail_bytes(url: str, timeout: float = 12.0) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": BROWSER_UA,
+            "Accept": "image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*;q=0.8",
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            "Referer": _referer_for_image_url(url),
+            "Sec-Fetch-Dest": "image",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "cross-site",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def pixmap_from_image_bytes(data: bytes) -> QPixmap | None:
+    if not data:
+        return None
+    img = QImage()
+    if img.loadFromData(data):
+        pix = QPixmap.fromImage(img)
+        if not pix.isNull():
+            return pix
+    return None
+
+
+def collect_thumbnail_urls(info: dict) -> list:
+    """Ordena por resolución y devuelve URLs únicas (YouTube a veces solo sirve bien algunas)."""
+    out = []
+    thumbs = info.get("thumbnails") or []
+    if thumbs:
+
+        def area(t):
+            return (t.get("height") or 0) * (t.get("width") or 0)
+
+        for t in sorted(thumbs, key=area, reverse=True):
+            u = t.get("url")
+            if isinstance(u, str) and u.startswith("http") and u not in out:
+                out.append(u)
+    main = info.get("thumbnail")
+    if isinstance(main, str) and main.startswith("http") and main not in out:
+        out.insert(0, main)
+    return out
 
 PRESET_WHATSAPP = "WhatsApp 720p"
 PRESET_MAX = "Máxima calidad (video)"
@@ -116,6 +238,18 @@ FRIENDLY_ERRORS = (
     (
         "Unable to extract",
         "yt-dlp no pudo leer este enlace. Probablemente necesita actualizarse.",
+    ),
+    (
+        "Cannot parse data",
+        "Facebook/Meta a veces devuelve una página que yt-dlp no puede leer. "
+        "Actualiza yt-dlp (ideal nightly), instala el paquete curl-cffi, y para enlaces Meta "
+        "esta app ya usa impersonación de navegador automáticamente.",
+    ),
+    (
+        "Impersonate target",
+        "La huella TLS del navegador no está disponible. "
+        "En yt-dlp, `curl-cffi` suele necesitarse en la rama 0.14.x (no 0.15.x). "
+        "Prueba: `pip install \"curl-cffi<0.15\"` y vuelve a intentarlo.",
     ),
     (
         "Unsupported URL",
@@ -207,6 +341,22 @@ def resource_path(relative_name: str) -> str:
     if hasattr(sys, "_MEIPASS"):
         return os.path.join(sys._MEIPASS, relative_name)
     return os.path.join(os.path.dirname(__file__), relative_name)
+
+
+_ytdlp_youtube_dl = None
+_ytdlp_download_range_func = None
+
+
+def _import_ytdlp():
+    """Import yt-dlp on first use only (large cold-start cost at module import)."""
+    global _ytdlp_youtube_dl, _ytdlp_download_range_func
+    if _ytdlp_youtube_dl is None:
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import download_range_func
+
+        _ytdlp_youtube_dl = YoutubeDL
+        _ytdlp_download_range_func = download_range_func
+    return _ytdlp_youtube_dl, _ytdlp_download_range_func
 
 
 def check_tool(tool_name):
@@ -390,6 +540,22 @@ def save_recent_urls(settings: QSettings, urls):
 
 class UserCancelledError(Exception):
     """El usuario canceló la descarga o la conversión."""
+
+
+class ClipTimestampError(Exception):
+    """Marcas de tiempo de recorte fuera del rango del video."""
+
+
+def _ydl_opts_metadata_only(url: str | None = None):
+    opts = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if url:
+        _merge_meta_impersonate_ytdlp_opts(url, opts)
+    return opts
 
 
 def make_ydl_progress_hook(cancel_event, pct_lo, pct_hi, emit):
@@ -669,6 +835,7 @@ def aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger):
         s = start_sec if start_sec is not None else 0
         e = end_sec if end_sec is not None else float("inf")
 
+        _, download_range_func = _import_ytdlp()
         ydl_opts["download_ranges"] = download_range_func(None, [(s, e)])
 
         if "extractor_args" not in ydl_opts:
@@ -709,10 +876,26 @@ def descargar_video_whatsapp(
         ]
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+    _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    YoutubeDL, _ = _import_ytdlp()
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        # Si esta build no tiene disponible curl_cffi/impersonation,
+        # reintentamos sin 'impersonate' para evitar que falle toda la descarga.
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            logger("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise
 
     base, _ = os.path.splitext(filename)
     mp4_candidate = base + ".mp4"
@@ -747,10 +930,24 @@ def descargar_video_car(
         ]
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+    _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    YoutubeDL, _ = _import_ytdlp()
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            logger("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise
 
     base, _ = os.path.splitext(filename)
     mp4_candidate = base + ".mp4"
@@ -806,10 +1003,24 @@ def descargar_video_max_calidad(
         ]
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+    _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    YoutubeDL, _ = _import_ytdlp()
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            logger("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise
 
     base, _ = os.path.splitext(filename)
     mp4_candidate = base + ".mp4"
@@ -853,10 +1064,24 @@ def descargar_audio_mp3(
         ]
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+    _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    YoutubeDL, _ = _import_ytdlp()
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            logger("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise
 
     base, _ = os.path.splitext(filename)
     mp3_file = base + ".mp3"
@@ -892,6 +1117,76 @@ def descargar_audio_mp3(
 
     logger(f"✅ Audio MP3 listo: {mp3_file}")
     return mp3_file
+
+
+_CLIP_TIME_EPS = 1e-3
+
+
+def clip_range_requested(start_time, end_time) -> bool:
+    return parse_time(start_time) is not None or parse_time(end_time) is not None
+
+
+def fetch_video_duration_seconds(url: str) -> float | None:
+    YoutubeDL, _ = _import_ytdlp()
+    ydl_opts = _ydl_opts_metadata_only(url)
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            # Si no hay impersonate disponible en el .exe, al menos intentamos metadatos sin esa huella.
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=False)
+        else:
+            raise
+    d = info.get("duration")
+    if d is None:
+        return None
+    try:
+        sec = float(d)
+    except (TypeError, ValueError):
+        return None
+    if sec <= 0:
+        return None
+    return sec
+
+
+def validate_clip_against_duration(start_time, end_time, duration: float) -> None:
+    start_sec = parse_time(start_time)
+    end_sec = parse_time(end_time)
+    if start_sec is None and end_sec is None:
+        return
+
+    s = start_sec if start_sec is not None else 0.0
+    hint = (
+        f"Duración del video: {duration:.2f} s (hasta {format_duration(duration)}). "
+        "Los tiempos válidos van de 0 s hasta ese momento; el inicio debe ser menor que el fin."
+    )
+
+    if s < -_CLIP_TIME_EPS:
+        raise ClipTimestampError(f"El tiempo de inicio no puede ser negativo. {hint}")
+
+    if end_sec is None:
+        if s >= duration - _CLIP_TIME_EPS:
+            raise ClipTimestampError(
+                f"El tiempo de inicio ({s:.2f} s) está en el final del video o más allá; "
+                f"no queda fragmento que recortar. {hint}"
+            )
+        return
+
+    e = float(end_sec)
+    if e > duration + _CLIP_TIME_EPS:
+        raise ClipTimestampError(
+            f"El tiempo de fin ({e:.2f} s) supera la duración del video ({duration:.2f} s). {hint}"
+        )
+    if s >= e - _CLIP_TIME_EPS:
+        raise ClipTimestampError(
+            f"El tiempo de inicio debe ser estrictamente anterior al de fin "
+            f"(inicio {s:.2f} s, fin {e:.2f} s). {hint}"
+        )
 
 
 # ============================================================
@@ -940,6 +1235,18 @@ class Worker(QObject):
             logger("📁 Carpeta: " + self.carpeta_salida)
             logger(f"🎚 Modo: {self.preset}")
             emit_progress(0, "Iniciando…")
+
+            if clip_range_requested(self.start_time, self.end_time):
+                duration = fetch_video_duration_seconds(self.url)
+                if duration is None:
+                    raise ClipTimestampError(
+                        "No se pudo obtener la duración del video (puede ser una transmisión en "
+                        "vivo o el sitio no publica esa información). No se puede recortar por "
+                        "tiempo sin conocer la duración."
+                    )
+                validate_clip_against_duration(
+                    self.start_time, self.end_time, duration
+                )
 
             if self.preset == PRESET_WHATSAPP:
                 input_file, info = descargar_video_whatsapp(
@@ -1066,14 +1373,21 @@ class MetadataFetcher(QObject):
         if not url:
             return
         try:
-            opts = {
-                "skip_download": True,
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-            }
-            with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            YoutubeDL, _ = _import_ytdlp()
+            ydl_opts = _ydl_opts_metadata_only(url)
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as e:
+                msg = str(e).lower()
+                if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+                    self.log.emit("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+                    ydl_opts2 = dict(ydl_opts)
+                    ydl_opts2.pop("impersonate", None)
+                    with YoutubeDL(ydl_opts2) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                else:
+                    raise
         except Exception as e:
             self.failed.emit(str(e), token)
             return
@@ -1082,6 +1396,7 @@ class MetadataFetcher(QObject):
             "channel": info.get("channel") or info.get("uploader") or "",
             "duration": info.get("duration"),
             "thumbnail": info.get("thumbnail") or "",
+            "thumbnail_urls": collect_thumbnail_urls(info),
             "url": url,
         }
         self.fetched.emit(data, token)
@@ -1294,6 +1609,7 @@ class SimpleView(QWidget):
     request_toggle_theme = Signal()
     request_start = Signal(str, str)
     request_cancel = Signal()
+    _thumbnail_loaded = Signal(QPixmap, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1306,6 +1622,7 @@ class SimpleView(QWidget):
         self._fetch_timer.setSingleShot(True)
         self._fetch_timer.setInterval(450)
         self._fetch_timer.timeout.connect(self._trigger_fetch)
+        self._thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self._build_ui()
 
     # ---------- UI ----------
@@ -1594,9 +1911,19 @@ class SimpleView(QWidget):
         if d:
             meta.append(d)
         self.preview_meta.setText(" · ".join(meta))
-        thumb = data.get("thumbnail")
-        if thumb:
-            self._load_thumbnail_async(thumb, token)
+        urls = data.get("thumbnail_urls") or []
+        if not urls and data.get("thumbnail"):
+            urls = [data["thumbnail"]]
+        if urls:
+            self._load_thumbnail_async(urls, token)
+
+    @Slot(QPixmap, int)
+    def _on_thumbnail_loaded(self, pix: QPixmap, token: int):
+        if token != self._token:
+            return
+        if pix.isNull():
+            return
+        self.thumb_label.setPixmap(pix)
 
     @Slot(str, int)
     def on_metadata_failed(self, msg, token):
@@ -1626,33 +1953,36 @@ class SimpleView(QWidget):
         self.preview.setVisible(True)
         self.request_fetch_metadata.emit(self._last_url, self._token)
 
-    def _load_thumbnail_async(self, url: str, token: int):
-        target = self.thumb_label
+    def _load_thumbnail_async(self, urls, token: int):
+        """Descarga miniatura en hilo aparte; aplica pixmap en hilo GUI vía señal."""
+        if isinstance(urls, str):
+            urls = [urls] if urls else []
+        if not urls:
+            return
         my_token = token
+        urls_copy = list(urls)
 
         def _fetch():
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "VibeLoader"})
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = r.read()
-            except Exception:
-                return
-            pix = QPixmap()
-            if not pix.loadFromData(data):
-                return
-            scaled = pix.scaled(
-                160,
-                90,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-
-            def _apply():
+            scaled = None
+            for url in urls_copy:
                 if my_token != self._token:
                     return
-                target.setPixmap(scaled)
-
-            QTimer.singleShot(0, _apply)
+                try:
+                    raw = fetch_thumbnail_bytes(url)
+                except Exception:
+                    continue
+                pix = pixmap_from_image_bytes(raw)
+                if pix is None or pix.isNull():
+                    continue
+                scaled = pix.scaled(
+                    160,
+                    90,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                break
+            if scaled is not None and not scaled.isNull():
+                self._thumbnail_loaded.emit(scaled, my_token)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -2235,8 +2565,36 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
+
+    splash = None
+    splash_path = resource_path("splash_screen.png")
+    if os.path.isfile(splash_path):
+        pix = QPixmap(splash_path)
+        if not pix.isNull():
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                geo = screen.availableGeometry()
+                max_w = max(120, int(geo.width() * 0.25))
+                max_h = max(120, int(geo.height() * 0.25))
+                pix = pix.scaled(
+                    max_w,
+                    max_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            splash = QSplashScreen(pix, Qt.WindowType.WindowStaysOnTopHint)
+            if screen is not None:
+                fg = splash.frameGeometry()
+                fg.moveCenter(geo.center())
+                splash.move(fg.topLeft())
+            splash.show()
+            app.processEvents()
+
     window = MainWindow()
     window.show()
+    if splash is not None:
+        splash.finish(window)
+
     sys.exit(app.exec())
 
 

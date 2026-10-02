@@ -1,7 +1,6 @@
 """Workers en hilos Qt: trabajo de descarga y extractor de metadatos."""
 import os
 import threading
-import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -23,7 +22,7 @@ from .ffmpeg_core import (
     FFMPEG_PROFILE_WHATSAPP,
     convert,
 )
-from .logs import append_log_file
+from .logs import log_exception
 from .utils import FolderSnapshot, pick_auto_output_path, remove_files
 from .ytdlp_core import (
     SPEC_CONVERT_SOURCE,
@@ -185,7 +184,7 @@ class Worker(QObject):
             self.progress.emit(0, "Cancelado")
             self._cleanup_failure(snapshot)
         except Exception as e:
-            append_log_file(traceback.format_exc())
+            log_exception(f"Error en el trabajo ({self.preset}) {self.url}")
             self._cleanup_failure(snapshot)
             self.error.emit(str(e))
         finally:
@@ -204,9 +203,15 @@ class MetadataFetcher(QObject):
     failed = Signal(str, int)
     log = Signal(str)
 
+    def __init__(self):
+        super().__init__()
+        # Lo escribe el hilo de la GUI antes de pedir; si llegaron varios pedidos
+        # seguidos (el usuario pegó varios enlaces), solo se procesa el último.
+        self.latest_token = 0
+
     @Slot(str, int)
     def fetch(self, url: str, token: int):
-        if not url:
+        if not url or token != self.latest_token:
             return
         try:
             data = fetch_metadata(url, logger=self.log.emit)

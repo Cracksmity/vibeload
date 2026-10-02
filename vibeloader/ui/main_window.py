@@ -1,5 +1,7 @@
 """Ventana principal: une vistas, worker, metadatos y bandeja."""
+import logging
 import os
+import sys
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon
@@ -7,11 +9,12 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QMainWindow,
+    QMessageBox,
     QStackedWidget,
     QSystemTrayIcon,
 )
 
-from ..config import DEFAULT_TARGET_SIZE_MB, SETTINGS_APP, SETTINGS_ORG, resource_path
+from ..config import APP_VERSION, DEFAULT_TARGET_SIZE_MB, SETTINGS_APP, SETTINGS_ORG, is_frozen, resource_path
 from ..jobs import MetadataFetcher, Worker
 from ..logs import append_log_file, ensure_log_path
 from ..settings import (
@@ -21,8 +24,9 @@ from ..settings import (
     save_recent_urls,
     suggested_default_dirs,
 )
-from ..utils import check_tool
-from ..ytdlp_core import maybe_update_ytdlp_in_background
+from ..ffmpeg_core import ffmpeg_version
+from ..tools import ffmpeg_available, ffmpeg_path, ffprobe_path
+from ..ytdlp_core import maybe_update_ytdlp_in_background, ytdlp_version
 from .advanced_view import AdvancedView
 from .dialogs import DefaultFoldersConfigDialog
 from .simple_view import SimpleView
@@ -36,7 +40,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         ensure_log_path()
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-        self.setWindowTitle("VibeLoader ✨")
+        self.setWindowTitle(f"VibeLoader {APP_VERSION} ✨")
         self.setMinimumSize(820, 620)
         self.setWindowIcon(QIcon(resource_path("icono.ico")))
 
@@ -112,15 +116,17 @@ class MainWindow(QMainWindow):
         self._apply_theme()
 
         # Start log
-        self._log_to_advanced("🔎 Verificando herramientas…")
-        for t in ("ffmpeg", "ffprobe"):
-            ok = check_tool(t)
+        self._log_to_advanced(
+            f"🚀 VibeLoader {APP_VERSION} · yt-dlp {ytdlp_version()} · "
+            f"{'exe' if is_frozen() else 'Python ' + sys.version.split()[0]}"
+        )
+        for name, path in (("ffmpeg", ffmpeg_path()), ("ffprobe", ffprobe_path())):
+            self._log_to_advanced(f"{'✅' if path else '❌'} {name}: {path or 'NO encontrado'}")
+        if ffmpeg_path():
+            self._log_to_advanced(f"   {ffmpeg_version()}")
+        if not ffmpeg_available():
             self._log_to_advanced(
-                f"{'✅' if ok else '❌'} {t}: {'OK' if ok else 'NO encontrado en PATH'}"
-            )
-        if not check_tool("ffmpeg") or not check_tool("ffprobe"):
-            self._log_to_advanced(
-                "⚠️ Necesitas ffmpeg y ffprobe en el PATH. Sin ellos no funcionan los modos WhatsApp, Auto ni MP3 con portada."
+                "⚠️ Sin ffmpeg y ffprobe no funciona ningún modo (unir video+audio, convertir, MP3)."
             )
 
         # Auto-update opcional
@@ -190,8 +196,16 @@ class MainWindow(QMainWindow):
         self.simple_view.update_folder_hint(self.default_dirs)
         self.advanced_view.set_default_dirs(self.default_dirs)
 
+    # ---------- ffmpeg ----------
+    def _on_ffmpeg_missing(self):
+        self._log_to_advanced(
+            "❌ Falta ffmpeg/ffprobe. Instálalo (p. ej. «winget install Gyan.FFmpeg») "
+            "y vuelve a abrir VibeLoader."
+        )
+
     # ---------- Metadatos ----------
     def _forward_metadata_request(self, url: str, token: int):
+        self._meta.latest_token = token
         self.request_metadata.emit(url, token)
 
     # ---------- Job ----------
@@ -209,6 +223,13 @@ class MainWindow(QMainWindow):
     def _launch_job(self, url, preset, folder, start_t, end_t, source_view):
         if self._job_running:
             self._log_to_advanced("⚠️ Ya hay una descarga en curso.")
+            return
+        if not ffmpeg_available():
+            source_view.show_error(
+                "No se encontró ffmpeg, que hace falta para todos los modos. "
+                "Usa el botón «Descargar ffmpeg» o instálalo y agrégalo al PATH."
+            )
+            self._on_ffmpeg_missing()
             return
         self._job_running = True
         self._job_cancelled = False
@@ -311,11 +332,45 @@ class MainWindow(QMainWindow):
 
     # ---------- Cierre ----------
     def closeEvent(self, e):
-        try:
-            if self.worker is not None and self._job_running:
+        if self._job_running:
+            r = QMessageBox.question(
+                self,
+                "Descarga en curso",
+                "Hay una descarga en curso. ¿Cancelarla y salir?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
+            self._job_cancelled = True
+            if self.worker is not None:
                 self.worker.request_cancel()
-            self._meta_thread.quit()
-            self._meta_thread.wait(1500)
-        except Exception:
-            pass
+        stopped = self._stop_thread(self.thread, 15000) if self._job_running else True
+        stopped = self._stop_thread(self._meta_thread, 3000) and stopped
+        if not stopped:
+            # Un hilo sigue bloqueado en la red. Destruir un QThread en marcha
+            # aborta la app con un error, y terminate() puede corromper memoria:
+            # se guarda todo y se sale del proceso directamente.
+            append_log_file("⚠️ Cierre forzado: un hilo no terminó a tiempo.")
+            self.settings.sync()
+            logging.shutdown()
+            os._exit(0)
         super().closeEvent(e)
+
+    @staticmethod
+    def _stop_thread(thread, timeout_ms: int) -> bool:
+        """Pide al hilo que termine y espera. True si terminó.
+
+        quit() se llama directo: la conexión worker.finished → thread.quit es
+        encolada hacia este hilo (la GUI), que aquí está bloqueado en wait().
+        """
+        if thread is None:
+            return True
+        try:
+            if not thread.isRunning():
+                return True
+            thread.quit()
+            return thread.wait(timeout_ms)
+        except RuntimeError:
+            return True  # el objeto C++ ya se borró (deleteLater): el hilo terminó

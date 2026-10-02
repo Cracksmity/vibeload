@@ -23,7 +23,7 @@ from ..config import (
     TARGET_SIZE_CHOICES,
 )
 from ..errors import friendly
-from ..urls import find_url_in_text
+from ..urls import find_url_in_text, is_http_url
 
 
 class AdvancedView(QWidget):
@@ -258,6 +258,9 @@ class AdvancedView(QWidget):
         end_t = self.end_edit.text().strip()
         if not url:
             self.append_log("⚠️ Pega o escribe una URL.")
+            return
+        if not is_http_url(url):
+            self.append_log("⚠️ Esa URL no se ve válida: debe empezar con http:// o https://")
             return
         if not carpeta:
             self.append_log("⚠️ Elige una carpeta de salida.")

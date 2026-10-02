@@ -4,7 +4,7 @@ import sys
 
 SETTINGS_ORG = "VibeLoader"
 SETTINGS_APP = "VibeLoader"
-APP_VERSION = "2.0"
+APP_VERSION = "3.0"
 
 # Cabeceras tipo navegador (YouTube / CDNs suelen bloquear User-Agent genérico de Python)
 BROWSER_UA = (

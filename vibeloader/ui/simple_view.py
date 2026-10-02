@@ -3,7 +3,7 @@ import os
 import threading
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 
 from ..config import PRESET_CAR, PRESET_DIRECTO, PRESET_MAX, PRESET_MP3
 from ..errors import friendly
-from ..thumbnails import fetch_thumbnail_bytes, pixmap_from_image_bytes
-from ..urls import find_url_in_text, looks_like_supported_url
+from ..thumbnails import fetch_thumbnail_bytes, image_from_bytes
+from ..urls import find_url_in_text, is_http_url, looks_like_supported_url
 from ..utils import format_duration
 
 
@@ -34,7 +34,7 @@ class SimpleView(QWidget):
     request_toggle_theme = Signal()
     request_start = Signal(str, str)
     request_cancel = Signal()
-    _thumbnail_loaded = Signal(QPixmap, int)
+    _thumbnail_loaded = Signal(QImage, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,7 +81,7 @@ class SimpleView(QWidget):
         url_row = QHBoxLayout()
         self.url_edit = QLineEdit()
         self.url_edit.setObjectName("bigUrl")
-        self.url_edit.setPlaceholderText("Pega aquí el enlace de YouTube")
+        self.url_edit.setPlaceholderText("Pega aquí el enlace (YouTube, TikTok, Facebook, Instagram…)")
         self.url_edit.setClearButtonEnabled(True)
         self.url_edit.textChanged.connect(self._on_url_changed)
         url_row.addWidget(self.url_edit, 1)
@@ -369,13 +369,11 @@ class SimpleView(QWidget):
         if urls:
             self._load_thumbnail_async(urls, token)
 
-    @Slot(QPixmap, int)
-    def _on_thumbnail_loaded(self, pix: QPixmap, token: int):
-        if token != self._token:
+    @Slot(QImage, int)
+    def _on_thumbnail_loaded(self, img: QImage, token: int):
+        if token != self._token or img.isNull():
             return
-        if pix.isNull():
-            return
-        self.thumb_label.setPixmap(pix)
+        self.thumb_label.setPixmap(QPixmap.fromImage(img))
 
     @Slot(str, int)
     def on_metadata_failed(self, msg, token):
@@ -389,7 +387,7 @@ class SimpleView(QWidget):
         self.error_card.setVisible(False)
         self.result_card.setVisible(False)
         url = text.strip()
-        if looks_like_supported_url(url):
+        if is_http_url(url):
             self._last_url = url
             self._fetch_timer.start()
         else:
@@ -415,26 +413,16 @@ class SimpleView(QWidget):
         urls_copy = list(urls)
 
         def _fetch():
-            scaled = None
-            for url in urls_copy:
+            for url in urls_copy[:6]:
                 if my_token != self._token:
                     return
                 try:
-                    raw = fetch_thumbnail_bytes(url)
+                    img = image_from_bytes(fetch_thumbnail_bytes(url))
                 except Exception:
                     continue
-                pix = pixmap_from_image_bytes(raw)
-                if pix is None or pix.isNull():
-                    continue
-                scaled = pix.scaled(
-                    160,
-                    90,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                break
-            if scaled is not None and not scaled.isNull():
-                self._thumbnail_loaded.emit(scaled, my_token)
+                if img is not None:
+                    self._thumbnail_loaded.emit(img, my_token)
+                    return
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -456,9 +444,9 @@ class SimpleView(QWidget):
         if not url:
             self.show_error("Pega un enlace antes de descargar.")
             return
-        if not looks_like_supported_url(url):
+        if not is_http_url(url):
             self.show_error(
-                "Ese enlace no se ve válido. Asegúrate de copiar uno de YouTube u otro sitio compatible."
+                "Ese enlace no se ve válido. Copia el enlace completo, que empiece con https://"
             )
             return
         self.error_card.setVisible(False)

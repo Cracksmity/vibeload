@@ -192,6 +192,22 @@ def probe_media(path) -> MediaInfo:
         return MediaInfo()
 
 
+def ffmpeg_version() -> str:
+    """Primera línea de `ffmpeg -version` (para el log de arranque)."""
+    try:
+        r = subprocess.run(
+            [ffmpeg_exe(), "-hide_banner", "-version"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            creationflags=no_window_flags(),
+        )
+        return (r.stdout or "").splitlines()[0][:120] if r.stdout else ""
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return ""
+
+
 def ffprobe_duration_seconds(path):
     return probe_media(path).duration
 

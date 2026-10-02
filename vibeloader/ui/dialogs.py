@@ -13,27 +13,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import (
-    PRESET_CAR,
-    PRESET_CURSOS,
-    PRESET_DIRECTO,
-    PRESET_MAX,
-    PRESET_MP3,
-    PRESET_TAMANO,
-    PRESET_WHATSAPP,
-)
+from ..config import ALL_PRESETS, preset_label
 
 
 class DefaultFoldersConfigDialog(QDialog):
-    ROWS = (
-        (PRESET_WHATSAPP, "Videos para WhatsApp:"),
-        (PRESET_MAX, "Videos en máxima calidad:"),
-        (PRESET_MP3, "Música / MP3:"),
-        (PRESET_CAR, "Videos para Modo Auto (autoestéreo):"),
-        (PRESET_DIRECTO, "Videos en Modo Descarga Directa:"),
-        (PRESET_CURSOS, "Videos en Modo Cursos (H.265):"),
-        (PRESET_TAMANO, "Videos comprimidos a tamaño máximo:"),
-    )
+    ROWS = tuple((p, preset_label(p)) for p in ALL_PRESETS)
 
     def __init__(self, parent, paths: dict, first_run: bool = False):
         super().__init__(parent)
@@ -41,15 +25,15 @@ class DefaultFoldersConfigDialog(QDialog):
         self.setWindowTitle(
             "Bienvenida — carpetas predeterminadas"
             if first_run
-            else "Carpetas predeterminadas"
+            else "Carpetas por formato"
         )
         self.setMinimumWidth(620)
 
         layout = QVBoxLayout(self)
         if first_run:
             intro = QLabel(
-                "Es la primera vez que abres VibeLoader. Elige dónde guardar "
-                "los archivos de cada modo (puedes cambiarlo después)."
+                "Elige dónde guardar los archivos de cada formato. "
+                "Puedes cambiarlo después en ⋯ › Carpetas por formato."
             )
             intro.setWordWrap(True)
             layout.addWidget(intro)
@@ -83,7 +67,7 @@ class DefaultFoldersConfigDialog(QDialog):
         for key, edit in self._edits.items():
             if not edit.text().strip():
                 QMessageBox.warning(
-                    self, "Falta una ruta", f"Indica una carpeta válida para «{key}»."
+                    self, "Falta una carpeta", f"Elige una carpeta para «{preset_label(key)}»."
                 )
                 return
         self.accept()

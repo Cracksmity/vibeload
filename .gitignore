@@ -22,3 +22,6 @@ dist/
 # Entorno virtual con punto
 .venv/
 .pytest_cache/
+
+# Generado al compilar
+vibeloader/_build_info.py

@@ -77,6 +77,21 @@ class SimpleView(QWidget):
         sub.setObjectName("SubtitleLabel")
         layout.addWidget(sub)
 
+        # Aviso (falta ffmpeg, yt-dlp actualizado…)
+        self.notice_card = QFrame()
+        self.notice_card.setObjectName("card_notice")
+        self.notice_card.setVisible(False)
+        nl = QHBoxLayout(self.notice_card)
+        nl.setContentsMargins(12, 8, 12, 8)
+        self.notice_text = QLabel("")
+        self.notice_text.setWordWrap(True)
+        nl.addWidget(self.notice_text, 1)
+        self.notice_btn = QPushButton("")
+        self.notice_btn.clicked.connect(self._on_notice_clicked)
+        nl.addWidget(self.notice_btn)
+        self._notice_action = None
+        layout.addWidget(self.notice_card)
+
         # URL row
         url_row = QHBoxLayout()
         self.url_edit = QLineEdit()
@@ -301,6 +316,23 @@ class SimpleView(QWidget):
         self.error_text.setText(f"⚠ {friendly(msg)}")
         self.error_card.setVisible(True)
         self.result_card.setVisible(False)
+
+    def show_notice(self, text: str, button_text: str | None = None, action=None):
+        """Aviso persistente arriba de la vista (con botón opcional)."""
+        self.notice_text.setText(text)
+        self._notice_action = action
+        self.notice_btn.setVisible(bool(button_text and action))
+        if button_text:
+            self.notice_btn.setText(button_text)
+        self.notice_card.setVisible(True)
+
+    def hide_notice(self):
+        self.notice_card.setVisible(False)
+        self._notice_action = None
+
+    def _on_notice_clicked(self):
+        if self._notice_action:
+            self._notice_action()
 
     def show_cancelled(self):
         self.error_text.setText("Descarga cancelada.")

@@ -1,14 +1,11 @@
 """Todo lo que habla con yt-dlp: opciones, descarga y metadatos."""
 import os
-import subprocess
-import sys
-import threading
 from dataclasses import dataclass, field
 
-from .config import META_YTDLP_IMPERSONATE, is_frozen
+from .config import META_YTDLP_IMPERSONATE
 from .errors import ClipTimestampError, PlaylistNotSupportedError, UserCancelledError
 from .thumbnails import collect_thumbnail_urls
-from .tools import ffmpeg_location_for_ytdlp, no_window_flags
+from .tools import ffmpeg_location_for_ytdlp
 from .urls import _host_is_meta, _host_is_youtube, _url_hostname_lower
 from .utils import format_duration, parse_time
 
@@ -496,32 +493,3 @@ def fetch_metadata(url: str, logger=None) -> dict:
         "playlist_count": info.get("playlist_count") or len(entries),
         "url": url,
     }
-
-
-# ============================================================
-# AUTO-ACTUALIZACIÓN (modo desarrollo)
-# ============================================================
-
-
-def maybe_update_ytdlp_in_background(logger):
-    """Intenta `pip install -U yt-dlp` en hilo separado (solo sin congelar)."""
-    if is_frozen():
-        return
-
-    def _worker():
-        try:
-            r = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", "yt-dlp[default,curl-cffi]"],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                creationflags=no_window_flags(),
-            )
-            if r.returncode == 0:
-                logger("✅ yt-dlp verificado/actualizado (se usa al reiniciar la app).")
-            else:
-                logger("⚠️ No se pudo actualizar yt-dlp: " + (r.stderr or "").strip()[:200])
-        except Exception as e:
-            logger(f"⚠️ Error al actualizar yt-dlp: {e}")
-
-    threading.Thread(target=_worker, daemon=True).start()

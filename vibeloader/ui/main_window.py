@@ -2,20 +2,23 @@
 import logging
 import os
 import sys
+import time
 
-from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QProcess, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QStackedWidget,
     QSystemTrayIcon,
 )
 
 from ..config import APP_VERSION, DEFAULT_TARGET_SIZE_MB, SETTINGS_APP, SETTINGS_ORG, is_frozen, resource_path
-from ..jobs import MetadataFetcher, Worker
+from .. import updater
+from ..jobs import BackgroundTask, MetadataFetcher, Worker
 from ..logs import append_log_file, ensure_log_path
 from ..settings import (
     load_default_dirs_from_settings,
@@ -25,8 +28,8 @@ from ..settings import (
     suggested_default_dirs,
 )
 from ..ffmpeg_core import ffmpeg_version
-from ..tools import ffmpeg_available, ffmpeg_path, ffprobe_path
-from ..ytdlp_core import maybe_update_ytdlp_in_background, ytdlp_version
+from ..tools import ffmpeg_available, ffmpeg_path, ffprobe_path, local_ffmpeg_dir
+from ..ytdlp_core import ytdlp_version
 from .advanced_view import AdvancedView
 from .dialogs import DefaultFoldersConfigDialog
 from .simple_view import SimpleView
@@ -42,7 +45,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.setWindowTitle(f"VibeLoader {APP_VERSION} ✨")
         self.setMinimumSize(820, 620)
-        self.setWindowIcon(QIcon(resource_path("icono.ico")))
+        self.setWindowIcon(QIcon(resource_path("assets/icono.ico")))
 
         loaded = load_default_dirs_from_settings(self.settings)
         self._pending_first_run = loaded is None
@@ -60,6 +63,7 @@ class MainWindow(QMainWindow):
         self._job_failed = False
         self._active_view_for_job = None
         self._last_completed_path = None
+        self._bg_tasks = set()  # mantiene vivas las BackgroundTask en curso
 
         self._meta_thread = QThread(self)
         self._meta = MetadataFetcher()
@@ -71,7 +75,7 @@ class MainWindow(QMainWindow):
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(self)
-            icon_path = resource_path("icono.ico")
+            icon_path = resource_path("assets/icono.ico")
             if os.path.exists(icon_path):
                 self.tray.setIcon(QIcon(icon_path))
             else:
@@ -107,6 +111,14 @@ class MainWindow(QMainWindow):
         self.advanced_view.request_toggle_theme.connect(self._toggle_theme)
         self.advanced_view.request_start.connect(self._start_from_advanced)
         self.advanced_view.request_cancel.connect(self._cancel_job)
+        self.advanced_view.request_update_ytdlp.connect(lambda: self._update_ytdlp(manual=True))
+        self.advanced_view.request_install_ffmpeg.connect(self._offer_ffmpeg_download)
+        self.advanced_view.auto_update_chk.setChecked(
+            self.settings.value("auto_update_ytdlp", True, type=bool)
+        )
+        self.advanced_view.auto_update_toggled.connect(
+            lambda on: self.settings.setValue("auto_update_ytdlp", bool(on))
+        )
 
         self._meta.fetched.connect(self.simple_view.on_metadata)
         self._meta.failed.connect(self.simple_view.on_metadata_failed)
@@ -128,11 +140,13 @@ class MainWindow(QMainWindow):
             self._log_to_advanced(
                 "⚠️ Sin ffmpeg y ffprobe no funciona ningún modo (unir video+audio, convertir, MP3)."
             )
+            self._show_ffmpeg_notice()
 
-        # Auto-update opcional
-        if self.settings.value("auto_update_ytdlp", False, type=bool):
-            self._log_to_advanced("🔄 Buscando actualización de yt-dlp…")
-            maybe_update_ytdlp_in_background(self._log_to_advanced)
+        # yt-dlp al día (como máximo una vez por día, en segundo plano)
+        if self.settings.value("auto_update_ytdlp", True, type=bool) and updater.should_check_now(
+            self.settings.value("ytdlp_last_check", 0.0, type=float)
+        ):
+            QTimer.singleShot(3000, lambda: self._update_ytdlp(manual=False))
 
         # Decide vista inicial
         last_view = str(self.settings.value("last_view", "simple"))
@@ -196,12 +210,132 @@ class MainWindow(QMainWindow):
         self.simple_view.update_folder_hint(self.default_dirs)
         self.advanced_view.set_default_dirs(self.default_dirs)
 
+    # ---------- Tareas de fondo ----------
+    def _run_task(self, fn, name, on_done, on_failed, on_progress=None):
+        task = BackgroundTask(fn, name)
+        self._bg_tasks.add(task)
+        task.log.connect(self._log_to_advanced)
+        if on_progress:
+            task.progress.connect(on_progress)
+
+        def _done(result):
+            self._bg_tasks.discard(task)
+            on_done(result)
+
+        def _failed(msg):
+            self._bg_tasks.discard(task)
+            on_failed(msg)
+
+        task.done.connect(_done)
+        task.failed.connect(_failed)
+        task.start()
+        return task
+
     # ---------- ffmpeg ----------
-    def _on_ffmpeg_missing(self):
-        self._log_to_advanced(
-            "❌ Falta ffmpeg/ffprobe. Instálalo (p. ej. «winget install Gyan.FFmpeg») "
-            "y vuelve a abrir VibeLoader."
+    def _show_ffmpeg_notice(self):
+        self.simple_view.show_notice(
+            "Falta ffmpeg, que VibeLoader necesita para unir y convertir videos.",
+            "Descargar ffmpeg",
+            self._offer_ffmpeg_download,
         )
+
+    def _on_ffmpeg_missing(self):
+        self._show_ffmpeg_notice()
+        self._offer_ffmpeg_download()
+
+    def _offer_ffmpeg_download(self):
+        if self._job_running:
+            QMessageBox.information(self, "ffmpeg", "Espera a que termine la descarga en curso.")
+            return
+        r = QMessageBox.question(
+            self,
+            "Descargar ffmpeg",
+            "VibeLoader descargará ffmpeg (unos 185 MB) desde GitHub (builds de BtbN), "
+            "verificará el archivo y lo guardará en su propia carpeta:\n\n"
+            f"{local_ffmpeg_dir()}\n\nNo se modifica nada del sistema. ¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        dlg = QProgressDialog("Descargando ffmpeg…", "Cancelar", 0, 100, self)
+        dlg.setWindowTitle("ffmpeg")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+
+        def work(task):
+            task.log.emit("⬇️ Descargando ffmpeg…")
+            return updater.install_ffmpeg(
+                local_ffmpeg_dir(),
+                progress=lambda d, t: task.progress.emit(d, t),
+                is_cancelled=task.cancel_event.is_set,
+            )
+
+        def on_progress(done, total):
+            if total:
+                dlg.setValue(int(done * 100 / total))
+                dlg.setLabelText(f"Descargando ffmpeg… {done >> 20} de {total >> 20} MB")
+
+        def on_done(name):
+            dlg.close()
+            self.advanced_view.ffmpeg_btn.setEnabled(True)
+            self._log_to_advanced(f"✅ ffmpeg instalado ({name}) en {local_ffmpeg_dir()}")
+            self._log_to_advanced(f"   {ffmpeg_version()}")
+            self.simple_view.show_notice("ffmpeg quedó instalado. Ya puedes descargar.")
+            QTimer.singleShot(6000, self.simple_view.hide_notice)
+
+        def on_failed(msg):
+            dlg.close()
+            self.advanced_view.ffmpeg_btn.setEnabled(True)
+            self._log_to_advanced("❌ " + msg)
+            if not task.cancel_event.is_set():
+                QMessageBox.warning(self, "ffmpeg", f"No se pudo descargar ffmpeg:\n{msg}")
+
+        self.advanced_view.ffmpeg_btn.setEnabled(False)
+        task = self._run_task(work, "descarga de ffmpeg", on_done, on_failed, on_progress)
+        dlg.canceled.connect(task.cancel_event.set)
+        dlg.show()
+
+    # ---------- yt-dlp ----------
+    def _update_ytdlp(self, manual: bool):
+        self.advanced_view.update_btn.setEnabled(False)
+        if manual:
+            self._log_to_advanced("🔄 Buscando actualización de yt-dlp…")
+
+        def work(task):
+            log = task.log.emit if manual else append_log_file
+            if is_frozen():
+                return updater.install_latest_ytdlp(ytdlp_version(), logger=log)
+            updater.pip_update_ytdlp(logger=log)
+            return "pip"
+
+        def on_done(result):
+            self.advanced_view.update_btn.setEnabled(True)
+            self.settings.setValue("ytdlp_last_check", time.time())
+            if result and result != "pip":
+                self._log_to_advanced(f"✅ yt-dlp {result} listo. Se usará al reiniciar VibeLoader.")
+                self.simple_view.show_notice(
+                    f"Hay una versión nueva de yt-dlp ({result}) lista.",
+                    "Reiniciar",
+                    self._restart_app,
+                )
+
+        def on_failed(msg):
+            self.advanced_view.update_btn.setEnabled(True)
+            self._log_to_advanced("⚠️ No se pudo actualizar yt-dlp: " + msg)
+
+        self._run_task(work, "actualización de yt-dlp", on_done, on_failed)
+
+    def _restart_app(self):
+        if self._job_running:
+            QMessageBox.information(self, "Reiniciar", "Espera a que termine la descarga en curso.")
+            return
+        args = sys.argv[1:] if is_frozen() else sys.argv
+        if QProcess.startDetached(sys.executable, args)[0]:
+            self.close()
 
     # ---------- Metadatos ----------
     def _forward_metadata_request(self, url: str, token: int):

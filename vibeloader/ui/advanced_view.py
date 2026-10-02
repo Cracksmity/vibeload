@@ -3,6 +3,7 @@ import os
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -34,6 +35,9 @@ class AdvancedView(QWidget):
     request_toggle_theme = Signal()
     request_start = Signal(str, str, str, str, str)  # url, preset, folder, start, end
     request_cancel = Signal()
+    request_update_ytdlp = Signal()
+    request_install_ffmpeg = Signal()
+    auto_update_toggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -155,6 +159,24 @@ class AdvancedView(QWidget):
         self.progress.setValue(0)
         self.progress.setFormat("Esperando…")
         layout.addWidget(self.progress)
+
+        # Herramientas
+        tools_row = QHBoxLayout()
+        self.update_btn = QPushButton("Actualizar yt-dlp")
+        self.update_btn.setObjectName("secondary")
+        self.update_btn.setToolTip("Descarga la versión más nueva (YouTube cambia seguido)")
+        self.update_btn.clicked.connect(self.request_update_ytdlp)
+        self.ffmpeg_btn = QPushButton("Descargar ffmpeg")
+        self.ffmpeg_btn.setObjectName("secondary")
+        self.ffmpeg_btn.setToolTip("Instala ffmpeg en la carpeta de VibeLoader (no toca el sistema)")
+        self.ffmpeg_btn.clicked.connect(self.request_install_ffmpeg)
+        self.auto_update_chk = QCheckBox("Buscar actualizaciones de yt-dlp al iniciar")
+        self.auto_update_chk.toggled.connect(self.auto_update_toggled)
+        tools_row.addWidget(self.update_btn)
+        tools_row.addWidget(self.ffmpeg_btn)
+        tools_row.addWidget(self.auto_update_chk)
+        tools_row.addStretch()
+        layout.addLayout(tools_row)
 
         # Log
         self.log_box = QTextEdit()

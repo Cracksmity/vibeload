@@ -5,7 +5,9 @@ from PySide6.QtCore import QSettings
 
 from .config import (
     PRESET_CAR,
+    PRESET_CURSOS,
     PRESET_DIRECTO,
+    PRESET_TAMANO,
     PRESET_MAX,
     PRESET_MP3,
     PRESET_WHATSAPP,
@@ -24,6 +26,8 @@ def suggested_default_dirs():
         PRESET_MP3: music_dir,
         PRESET_CAR: os.path.join(base, "VibeLoader", "Auto"),
         PRESET_DIRECTO: os.path.join(base, "VibeLoader", "Directo"),
+        PRESET_CURSOS: os.path.join(base, "VibeLoader", "Cursos"),
+        PRESET_TAMANO: os.path.join(base, "VibeLoader", "Comprimidos"),
     }
 
 
@@ -35,10 +39,11 @@ def load_default_dirs_from_settings(settings: QSettings):
         out[preset] = str(settings.value(key) or "").strip()
     if not all(out.get(p) for p in (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3)):
         return None
-    if not out.get(PRESET_CAR):
-        out[PRESET_CAR] = suggested_default_dirs()[PRESET_CAR]
-    if not out.get(PRESET_DIRECTO):
-        out[PRESET_DIRECTO] = suggested_default_dirs()[PRESET_DIRECTO]
+    # Modos agregados después de la primera configuración: usar la carpeta sugerida.
+    suggested = suggested_default_dirs()
+    for preset in SETTINGS_KEYS:
+        if not out.get(preset):
+            out[preset] = suggested[preset]
     return out
 
 

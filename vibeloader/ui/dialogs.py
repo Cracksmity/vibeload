@@ -13,7 +13,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import PRESET_CAR, PRESET_DIRECTO, PRESET_MAX, PRESET_MP3, PRESET_WHATSAPP
+from ..config import (
+    PRESET_CAR,
+    PRESET_CURSOS,
+    PRESET_DIRECTO,
+    PRESET_MAX,
+    PRESET_MP3,
+    PRESET_TAMANO,
+    PRESET_WHATSAPP,
+)
 
 
 class DefaultFoldersConfigDialog(QDialog):
@@ -23,6 +31,8 @@ class DefaultFoldersConfigDialog(QDialog):
         (PRESET_MP3, "Música / MP3:"),
         (PRESET_CAR, "Videos para Modo Auto (autoestéreo):"),
         (PRESET_DIRECTO, "Videos en Modo Descarga Directa:"),
+        (PRESET_CURSOS, "Videos en Modo Cursos (H.265):"),
+        (PRESET_TAMANO, "Videos comprimidos a tamaño máximo:"),
     )
 
     def __init__(self, parent, paths: dict, first_run: bool = False):

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from ..config import SETTINGS_APP, SETTINGS_ORG, resource_path
+from ..config import DEFAULT_TARGET_SIZE_MB, SETTINGS_APP, SETTINGS_ORG, resource_path
 from ..jobs import MetadataFetcher, Worker
 from ..logs import append_log_file, ensure_log_path
 from ..settings import (
@@ -78,6 +78,10 @@ class MainWindow(QMainWindow):
         self.simple_view = SimpleView(self)
         self.advanced_view = AdvancedView(self)
         self.advanced_view.set_default_dirs(self.default_dirs)
+        self.advanced_view.set_encoder_mode(str(self.settings.value("encoder_mode", "auto")))
+        self.advanced_view.encoder_combo.currentIndexChanged.connect(
+            lambda _i: self.settings.setValue("encoder_mode", self.advanced_view.encoder_mode())
+        )
         self.simple_view.update_folder_hint(self.default_dirs)
         self.simple_view.set_recents(self.recent_urls)
 
@@ -219,7 +223,15 @@ class MainWindow(QMainWindow):
             self.simple_view.set_busy(True)
 
         self.thread = QThread()
-        self.worker = Worker(url, folder, preset, start_t, end_t)
+        self.worker = Worker(
+            url,
+            folder,
+            preset,
+            start_t,
+            end_t,
+            encoder_mode=self.advanced_view.encoder_mode(),
+            target_mb=self.advanced_view.target_size_mb() or DEFAULT_TARGET_SIZE_MB,
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.log.connect(self._on_worker_log)

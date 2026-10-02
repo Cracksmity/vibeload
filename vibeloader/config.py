@@ -24,9 +24,23 @@ PRESET_MAX = "Modo Video Max"
 PRESET_MP3 = "Modo Audio MP3"
 PRESET_CAR = "Modo Auto"
 PRESET_DIRECTO = "Modo Descarga Directa"
+PRESET_CURSOS = "Modo Cursos (H.265)"
+PRESET_TAMANO = "Modo Tamaño Máximo"
 
-ALL_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR, PRESET_DIRECTO)
-ADVANCED_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR, PRESET_DIRECTO)
+ALL_PRESETS = (
+    PRESET_WHATSAPP,
+    PRESET_MAX,
+    PRESET_MP3,
+    PRESET_CAR,
+    PRESET_DIRECTO,
+    PRESET_CURSOS,
+    PRESET_TAMANO,
+)
+ADVANCED_PRESETS = ALL_PRESETS
+
+# Tamaños sugeridos para el Modo Tamaño Máximo (MB).
+TARGET_SIZE_CHOICES = ("16", "25", "50", "64", "100", "500")
+DEFAULT_TARGET_SIZE_MB = 25.0
 
 SETTINGS_KEYS = {
     PRESET_WHATSAPP: "dir_whatsapp",
@@ -34,6 +48,8 @@ SETTINGS_KEYS = {
     PRESET_MP3: "dir_mp3",
     PRESET_CAR: "dir_car",
     PRESET_DIRECTO: "dir_directo",
+    PRESET_CURSOS: "dir_cursos",
+    PRESET_TAMANO: "dir_tamano",
 }
 
 

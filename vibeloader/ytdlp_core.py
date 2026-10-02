@@ -67,6 +67,14 @@ SPEC_CONVERT_SOURCE = DownloadSpec(
     restrictfilenames=True,
 )
 
+# Fuente para el Modo Tamaño Máximo: hasta 1080p (el bitrate decide la escala final).
+SPEC_CONVERT_SOURCE_1080 = DownloadSpec(
+    format="bv*+ba/b",
+    format_sort=("res:1080", "vcodec:h264", "acodec:aac"),
+    outtmpl="%(id)s.vlsrc.%(ext)s",
+    restrictfilenames=True,
+)
+
 # "Descargar Video": hasta 1080p, sin recomprimir, MP4 compatible.
 SPEC_MAX = DownloadSpec(
     format="bv*+ba/b",
@@ -259,7 +267,7 @@ def make_ydl_progress_hook(cancel_event, pct_lo, pct_hi, emit):
             else:
                 p = lo
                 msg = f"{label}…"
-            if speed:
+            if speed and not speed.lower().startswith("unknown"):
                 msg += f" · {speed}"
             if eta and eta.lower() not in ("unknown", "--:--"):
                 msg += f" · quedan {eta}"

@@ -5,24 +5,44 @@ import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .config import PRESET_CAR, PRESET_DIRECTO, PRESET_MAX, PRESET_MP3, PRESET_WHATSAPP
+from .config import (
+    DEFAULT_TARGET_SIZE_MB,
+    PRESET_CAR,
+    PRESET_CURSOS,
+    PRESET_DIRECTO,
+    PRESET_MAX,
+    PRESET_MP3,
+    PRESET_TAMANO,
+    PRESET_WHATSAPP,
+)
 from .errors import UserCancelledError
-from .ffmpeg_core import run_ffmpeg_car, run_ffmpeg_whatsapp
+from .ffmpeg_core import (
+    FFMPEG_PROFILE_CAR,
+    FFMPEG_PROFILE_CURSOS,
+    FFMPEG_PROFILE_TARGET,
+    FFMPEG_PROFILE_WHATSAPP,
+    convert,
+)
 from .logs import append_log_file
 from .utils import FolderSnapshot, pick_auto_output_path, remove_files
 from .ytdlp_core import (
     SPEC_CONVERT_SOURCE,
+    SPEC_CONVERT_SOURCE_1080,
     SPEC_DIRECTO,
     SPEC_MAX,
     SPEC_MP3,
+    clip_seconds,
     download,
     fetch_metadata,
 )
 
-# Presets que bajan una fuente y la recomprimen con ffmpeg.
+# Presets que bajan una fuente y la procesan con ffmpeg:
+# (perfil, fuente, nombre de salida, mensaje final)
 CONVERT_PRESETS = {
-    PRESET_WHATSAPP: (run_ffmpeg_whatsapp, "id", "✨ Listo. Compatible con WhatsApp."),
-    PRESET_CAR: (run_ffmpeg_car, "title", "✨ Listo. Compatible con autoestéreos."),
+    PRESET_WHATSAPP: (FFMPEG_PROFILE_WHATSAPP, SPEC_CONVERT_SOURCE, "id", "✨ Listo. Compatible con WhatsApp."),
+    PRESET_CAR: (FFMPEG_PROFILE_CAR, SPEC_CONVERT_SOURCE, "title", "✨ Listo. Compatible con autoestéreos."),
+    PRESET_CURSOS: (FFMPEG_PROFILE_CURSOS, SPEC_CONVERT_SOURCE, "title", "✨ Listo. Curso comprimido en H.265."),
+    PRESET_TAMANO: (FFMPEG_PROFILE_TARGET, SPEC_CONVERT_SOURCE_1080, "title", "✨ Listo. Video comprimido al tamaño pedido."),
 }
 
 # Presets que yt-dlp entrega ya terminados.
@@ -40,8 +60,19 @@ class Worker(QObject):
     progress = Signal(int, str)
     completed = Signal(str)
 
-    def __init__(self, url, carpeta_salida, preset, start_time, end_time):
+    def __init__(
+        self,
+        url,
+        carpeta_salida,
+        preset,
+        start_time,
+        end_time,
+        encoder_mode="auto",
+        target_mb=DEFAULT_TARGET_SIZE_MB,
+    ):
         super().__init__()
+        self.encoder_mode = encoder_mode
+        self.target_mb = target_mb
         self.url = url
         self.carpeta_salida = carpeta_salida
         self.preset = preset
@@ -68,18 +99,20 @@ class Worker(QObject):
         self.progress.emit(max(0, min(100, int(p))), msg)
 
     def _run_convert(self):
-        ffmpeg_fn, naming, done_msg = CONVERT_PRESETS[self.preset]
+        profile, spec, naming, done_msg = CONVERT_PRESETS[self.preset]
+        # El recorte lo hace ffmpeg en la misma pasada (una sola codificación).
         res = download(
             self.url,
             self.carpeta_salida,
-            SPEC_CONVERT_SOURCE,
+            spec,
             start_time=self.start_time,
             end_time=self.end_time,
+            cut_with_ytdlp=False,
             logger=self._logger,
             cancel_event=self._cancel_event,
             emit_progress=self._emit_progress,
             pct_lo=0,
-            pct_hi=72,
+            pct_hi=60,
         )
         info = res.info
         vid = str(info.get("id") or "video").strip()
@@ -90,15 +123,19 @@ class Worker(QObject):
             output_file = pick_auto_output_path(self.carpeta_salida, title, vid, res.path)
         if not os.path.exists(output_file):
             self._partial_outputs.append(output_file)
-        ffmpeg_fn(
+        convert(
             res.path,
             output_file,
-            self._logger,
-            self._emit_progress,
-            self._cancel_event,
-            self._proc_holder,
-            73,
-            99,
+            profile,
+            clip=clip_seconds(self.start_time, self.end_time),
+            encoder_mode=self.encoder_mode,
+            target_mb=self.target_mb if self.preset == PRESET_TAMANO else None,
+            logger=self._logger,
+            emit_progress=self._emit_progress,
+            cancel_event=self._cancel_event,
+            proc_holder=self._proc_holder,
+            pct_lo=61,
+            pct_hi=99,
         )
         remove_files([res.path], self._logger)
         self._logger(done_msg)

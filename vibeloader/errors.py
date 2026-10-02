@@ -1,9 +1,17 @@
 """Excepciones propias y traducción de errores a mensajes amigables."""
 
+# (texto a buscar, mensaje para el usuario). Se recorre en orden: lo más
+# específico va primero.
 FRIENDLY_ERRORS = (
     (
+        "Sign in to confirm your age",
+        "Este video tiene restricción de edad. Activa «Usar cookies del navegador» "
+        "en el modo avanzado (con una sesión de YouTube iniciada en ese navegador).",
+    ),
+    (
         "Sign in to confirm",
-        "YouTube pide iniciar sesión para confirmar que no eres un bot. Espera unos minutos y vuelve a intentarlo.",
+        "YouTube pide confirmar que no eres un bot. Espera unos minutos o activa "
+        "«Usar cookies del navegador» en el modo avanzado.",
     ),
     ("Private video", "Este video es privado, no se puede descargar."),
     (
@@ -12,64 +20,42 @@ FRIENDLY_ERRORS = (
     ),
     (
         "HTTP Error 403",
-        "El servidor rechazó la descarga (403). Probablemente yt-dlp necesita actualizarse.",
+        "El servidor rechazó la descarga (403). Probablemente yt-dlp necesita actualizarse "
+        "(botón «Actualizar yt-dlp» en el modo avanzado).",
     ),
+    ("HTTP Error 404", "Enlace no encontrado (404). Revisa que la URL esté correcta."),
+    ("HTTP Error 429", "Muchas peticiones seguidas (429). Espera un par de minutos y vuelve a intentar."),
     (
-        "HTTP Error 404",
-        "Enlace no encontrado (404). Revisa que la URL esté correcta.",
-    ),
-    (
-        "HTTP Error 429",
-        "Muchas peticiones seguidas (429). Espera un par de minutos y vuelve a intentar.",
+        "Requested format is not available",
+        "El sitio no ofrece un formato compatible para este video. Prueba otro modo "
+        "o actualiza yt-dlp.",
     ),
     (
         "Unable to extract",
-        "yt-dlp no pudo leer este enlace. Probablemente necesita actualizarse.",
+        "yt-dlp no pudo leer este enlace. Probablemente necesita actualizarse "
+        "(botón «Actualizar yt-dlp» en el modo avanzado).",
     ),
     (
         "Cannot parse data",
-        "Facebook/Meta a veces devuelve una página que yt-dlp no puede leer. "
-        "Actualiza yt-dlp (ideal nightly), instala el paquete curl-cffi, y para enlaces Meta "
-        "esta app ya usa impersonación de navegador automáticamente.",
+        "Facebook/Meta devolvió una página que yt-dlp no pudo leer. Actualiza yt-dlp "
+        "y vuelve a intentarlo en unos minutos.",
     ),
     (
         "Impersonate target",
-        "La huella TLS del navegador no está disponible. "
-        "En yt-dlp, `curl-cffi` suele necesitarse en la rama 0.14.x (no 0.15.x). "
-        "Prueba: `pip install \"curl-cffi<0.15\"` y vuelve a intentarlo.",
+        "Falta el componente de huella de navegador (curl_cffi) que usan Facebook/Instagram. "
+        "Reinstala las dependencias con requirements.txt.",
     ),
+    ("Unsupported URL", "Ese enlace no está soportado. Prueba con otro de YouTube u otro sitio."),
     (
-        "Unsupported URL",
-        "Ese enlace no está soportado. Prueba con otro de YouTube u otro sitio.",
+        "Unknown encoder 'libx265'",
+        "Tu ffmpeg no incluye H.265 (libx265), que necesita el Modo Cursos. "
+        "Usa el ffmpeg que descarga VibeLoader o una build «full».",
     ),
-    (
-        "ffmpeg not found",
-        "No se encontró ffmpeg. Instálalo y agrégalo al PATH.",
-    ),
-    (
-        "ffprobe not found",
-        "No se encontró ffprobe. Instálalo y agrégalo al PATH.",
-    ),
-    (
-        "no se encontró 'ffmpeg'",
-        "No se encontró ffmpeg en el PATH del sistema.",
-    ),
-    (
-        "no se encontró ffmpeg",
-        "No se encontró ffmpeg. Instálalo y agrégalo al PATH.",
-    ),
-    (
-        "ffmpeg exited with code",
-        "Error al procesar o recortar el video con FFmpeg. El stream del video puede requerir actualización de yt-dlp.",
-    ),
-    (
-        "WinError 5",
-        "Permiso denegado al guardar. Elige otra carpeta o cierra el archivo si lo tienes abierto.",
-    ),
-    (
-        "No space left",
-        "No hay espacio libre en el disco. Libera espacio y vuelve a intentar.",
-    ),
+    ("ffmpeg not found", "No se encontró ffmpeg. VibeLoader puede descargarlo por ti."),
+    ("ffprobe not found", "No se encontró ffprobe. VibeLoader puede descargarlo por ti."),
+    ("WinError 5", "Permiso denegado al guardar. Elige otra carpeta o cierra el archivo si lo tienes abierto."),
+    ("WinError 32", "El archivo está abierto en otro programa. Ciérralo y vuelve a intentar."),
+    ("No space left", "No hay espacio libre en el disco. Libera espacio y vuelve a intentar."),
     ("Cancelado", "Cancelaste la descarga."),
 )
 
@@ -81,7 +67,10 @@ def friendly(msg: str) -> str:
     for needle, friendly_msg in FRIENDLY_ERRORS:
         if needle.lower() in low:
             return friendly_msg
-    return msg.strip().split("\n")[0][:300]
+    first = msg.strip().split("\n")[0]
+    if first.startswith("ERROR: "):
+        first = first[len("ERROR: "):]
+    return first[:300]
 
 
 class UserCancelledError(Exception):
@@ -90,6 +79,14 @@ class UserCancelledError(Exception):
 
 class ClipTimestampError(Exception):
     """Marcas de tiempo de recorte fuera del rango del video."""
+
+
+class FfmpegError(Exception):
+    """ffmpeg terminó con error; el mensaje lleva la causa real (última línea de stderr)."""
+
+
+class TargetSizeTooSmallError(Exception):
+    """El tamaño objetivo es demasiado chico para la duración del video."""
 
 
 class PlaylistNotSupportedError(Exception):

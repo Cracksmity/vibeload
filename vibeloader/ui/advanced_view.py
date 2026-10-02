@@ -16,7 +16,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import ADVANCED_PRESETS
+from ..config import (
+    ADVANCED_PRESETS,
+    DEFAULT_TARGET_SIZE_MB,
+    PRESET_TAMANO,
+    TARGET_SIZE_CHOICES,
+)
 from ..errors import friendly
 from ..urls import find_url_in_text
 
@@ -111,7 +116,26 @@ class AdvancedView(QWidget):
         self.preset_combo.addItems(list(ADVANCED_PRESETS))
         self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
         preset_layout.addWidget(self.preset_combo, 1)
+
+        self.size_label = QLabel("Peso máx. (MB):")
+        self.size_combo = QComboBox()
+        self.size_combo.setEditable(True)
+        self.size_combo.addItems(list(TARGET_SIZE_CHOICES))
+        self.size_combo.setCurrentText(f"{DEFAULT_TARGET_SIZE_MB:g}")
+        self.size_combo.setFixedWidth(100)
+        self.size_combo.setToolTip("WhatsApp: hasta 2 GB · Discord gratis: 10 MB · correo: ~25 MB")
+        preset_layout.addWidget(self.size_label)
+        preset_layout.addWidget(self.size_combo)
         layout.addLayout(preset_layout)
+
+        enc_layout = QHBoxLayout()
+        enc_layout.addWidget(QLabel("Codificador:"))
+        self.encoder_combo = QComboBox()
+        self.encoder_combo.addItem("Automático (usa la tarjeta de video si se puede)", "auto")
+        self.encoder_combo.addItem("Solo CPU (más lento, archivos algo más chicos)", "cpu")
+        enc_layout.addWidget(self.encoder_combo, 1)
+        layout.addLayout(enc_layout)
+        self._update_size_visibility(self.preset_combo.currentText())
 
         # Acción
         action = QHBoxLayout()
@@ -146,8 +170,26 @@ class AdvancedView(QWidget):
             if d:
                 self.out_edit.setText(d)
 
+    def encoder_mode(self) -> str:
+        return self.encoder_combo.currentData() or "auto"
+
+    def set_encoder_mode(self, mode: str):
+        i = self.encoder_combo.findData(mode)
+        if i >= 0:
+            self.encoder_combo.setCurrentIndex(i)
+
+    def target_size_mb(self) -> float | None:
+        txt = self.size_combo.currentText().strip().lower().replace("mb", "").replace(",", ".")
+        try:
+            v = float(txt)
+        except ValueError:
+            return None
+        return v if v > 0 else None
+
     def set_busy(self, busy: bool):
         self._is_busy = busy
+        self.encoder_combo.setEnabled(not busy)
+        self.size_combo.setEnabled(not busy)
         self.start_btn.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy)
         self.url_edit.setEnabled(not busy)
@@ -185,11 +227,20 @@ class AdvancedView(QWidget):
         self.progress.setFormat("Cancelado")
 
     # ---------- Internal ----------
+    def _update_size_visibility(self, modo: str):
+        visible = modo == PRESET_TAMANO
+        self.size_label.setVisible(visible)
+        self.size_combo.setVisible(visible)
+
     def _on_preset_changed(self, modo: str):
+        self._update_size_visibility(modo)
         d = self._default_dirs.get(modo)
         if not d:
             return
-        if not self.out_edit.text().strip():
+        # Cambia a la carpeta del modo si la actual está vacía o es la de otro modo
+        # (no pisa una carpeta elegida a mano).
+        actual = self.out_edit.text().strip()
+        if not actual or actual in self._default_dirs.values():
             self.out_edit.setText(d)
 
     def _elegir_carpeta(self):
@@ -210,6 +261,9 @@ class AdvancedView(QWidget):
             return
         if not carpeta:
             self.append_log("⚠️ Elige una carpeta de salida.")
+            return
+        if preset == PRESET_TAMANO and self.target_size_mb() is None:
+            self.append_log("⚠️ Escribe un peso máximo válido en MB (por ejemplo 25).")
             return
         self.request_start.emit(url, preset, carpeta, start_t, end_t)
 

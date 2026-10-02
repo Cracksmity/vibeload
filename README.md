@@ -1,58 +1,73 @@
-# 🎧 VibeLoader ✨
+<p align="center">
+  <img src="brand/master/vibeload-horizontal.svg" alt="VibeLoader Logo" width="420" />
+  <br>
+  <em>Descarga · Convierte · Disfruta</em>
+</p>
+
+<p align="center">
+  <a href="brand/BRAND_GUIDELINES.md"><strong>Guía de Marca</strong></a>
+</p>
 
 VibeLoader es una aplicación de escritorio para Windows, escrita en Python, para **descargar y comprimir videos y música**. Usa **yt-dlp** para descargar (YouTube, TikTok, Facebook, Instagram, X y más de 1.800 sitios) y **ffmpeg** para convertir.
 
-Tiene dos vistas:
+Tiene dos vistas, que se cambian con el control *Simple | Avanzado* de la cabecera:
 
-- **Modo simple** (predeterminado): pegar enlace → tocar un botón → listo. Pensado para quien no quiere pelearse con códecs.
-- **Modo avanzado**: todos los modos, recortes por tiempo, tamaño máximo, subtítulos, cookies, cola de descargas y registro detallado.
+- **Simple** (predeterminada): pegar el enlace → elegir *Video* o *Solo audio* → listo. Pensada para quien no quiere pelearse con códecs.
+- **Avanzado**: todos los formatos, recortes por tiempo, peso objetivo, subtítulos, sesión del navegador, cola con progreso por descarga y registro detallado.
+
+Funciona bien en una ventana chica (mínimo 720×540): nada necesita maximizar ni hacer scroll.
 
 ---
 
 ## 🚀 Características
 
-### Modo simple
+### Simple
 
-Cuatro botones grandes:
+Dos botones grandes y un menú:
 
-| Botón | Resultado |
+| Elección | Resultado |
 |---|---|
-| **Descargar Música** | MP3 192 kbps con metadatos y portada. |
-| **Descargar Video** | MP4 **hasta 1080p** en H.264 + AAC, sin recomprimir: se reproduce en cualquier TV, celular o reproductor. |
-| **Descarga Directa** | MP4 **720p** H.264 + AAC, sin recodificar (cero carga para la CPU). |
-| **Modo Auto** | MP4 para autoestéreos: H.264 **Baseline @ L3.1**, AAC 44.1 kHz, `+faststart`. |
+| **Video** | MP4 **hasta 1080p** en H.264 + AAC, sin recomprimir: se reproduce en cualquier TV, celular o reproductor. |
+| **Solo audio** | MP3 192 kbps con metadatos y portada. |
+| **Más formatos ▾** | *Para el auto (USB)*, *Compatible 720p (sin convertir)* y *WhatsApp*. |
 
-Además: vista previa con miniatura, título, canal y duración; pegado automático desde el portapapeles; arrastrar y soltar enlaces; enlaces recientes; **historial**; y aviso con botón si falta ffmpeg o hay un yt-dlp nuevo.
+Además: vista previa con miniatura que reserva su lugar (los botones no se mueven), pegado automático desde el portapapeles con aviso para deshacerlo, arrastrar y soltar enlaces, Enter repite la última elección y una franja fija abajo que muestra el progreso, el resultado (*Abrir* / *Ver en carpeta*) o el error con **un botón que lo resuelve** (reintentar, usar tu sesión del navegador, actualizar el motor de descargas, instalar ffmpeg…).
 
-### Modo avanzado
+### Avanzado
 
-Los siete modos:
+Los siete formatos:
 
-| Modo | Qué hace |
+| Formato | Qué hace |
 |---|---|
-| `Modo WhatsApp (Base)` | H.264 Main@4.0 + AAC, lado largo ≤ 1280 (vertical 720×1280), ≤ 30 fps. Nombre: `id.mp4`. |
-| `Modo Video Max` | Igual que "Descargar Video" (hasta 1080p, sin recomprimir). |
-| `Modo Audio MP3` | MP3 192 kbps con portada. |
-| `Modo Auto` | Perfil para autoestéreos (ver arriba). Nombre: título del video. |
-| `Modo Descarga Directa` | 720p sin recodificar. |
-| `Modo Cursos (H.265)` | HEVC 720p, CRF 28, AAC 96 kbps, etiqueta `hvc1`. ~40-50 % menos peso que H.264: ideal para cursos y tutoriales largos. |
-| `Modo Tamaño Máximo` | Comprime a un **peso objetivo** (16 / 25 / 64 / 100 MB o el que escribas) con dos pasadas; la resolución se ajusta sola al bitrate. |
+| **WhatsApp** | H.264 Main@4.0 + AAC, lado largo ≤ 1280 (vertical 720×1280), ≤ 30 fps. Nombre: `id.mp4`. |
+| **Máxima calidad** | Igual que *Video* (hasta 1080p, sin recomprimir). |
+| **Solo audio (MP3)** | MP3 192 kbps con portada. |
+| **Para el auto (USB)** | MP4 para autoestéreos: H.264 **Baseline @ L3.1**, AAC 44.1 kHz, `+faststart`. Nombre: título del video. |
+| **Compatible 720p** | 720p H.264 + AAC sin recodificar (cero carga para la CPU). |
+| **Cursos (H.265)** | HEVC 720p, CRF 28, AAC 96 kbps, etiqueta `hvc1`. ~40-50 % menos peso que H.264: ideal para cursos y tutoriales largos. |
+| **Ajustar a un peso** | Comprime a un **peso objetivo** (16 / 25 / 64 / 100 MB o el que escribas) con dos pasadas; la resolución se ajusta sola al bitrate. |
+
+Las opciones que casi no cambian son **chips** debajo de los campos: punteados si están apagados, rellenos con su valor si están activos (la × los quita). Al hacer clic abren un panel chico:
+
+- **✂ Recortar** por tiempo (`MM:SS`, `HH:MM:SS`, `90s`, `1m30s`), validado contra la duración real. En los formatos que convierten, el corte se hace en la misma pasada de ffmpeg (una sola codificación).
+- **Subtítulos** (español / inglés): como `.srt` al lado del video o **incrustados** en el MP4.
+- **Sesión del navegador** (Firefox recomendado; Chrome y Edge hay que cerrarlos antes): para videos con restricción de edad o cuando YouTube pide confirmar que no eres un robot.
+- **Aceleración**: *GPU automática* usa la tarjeta de video (NVIDIA NVENC, Intel QuickSync o AMD AMF) si funciona de verdad (se prueba, no solo se lista). Si falla, reintenta con CPU. *Solo CPU* da archivos algo más chicos.
 
 Y también:
 
-- **Recorte** por tiempo (`MM:SS`, `HH:MM:SS`, `90s`, `1m30s`), validado contra la duración real. En los modos que convierten, el corte se hace en la misma pasada de ffmpeg (una sola codificación).
-- **Codificador**: *Automático* usa la tarjeta de video (NVIDIA NVENC, Intel QuickSync o AMD AMF) si funciona de verdad (se prueba, no solo se lista). Si falla, reintenta con CPU. *Solo CPU* da archivos algo más chicos.
 - **Copia sin recodificar**: si el video descargado ya cumple el perfil (por ejemplo 720p de YouTube para WhatsApp), solo se reempaqueta en segundos.
-- **Cola de descargas**: mientras baja algo puedes seguir agregando enlaces. Pestaña *Cola* para quitar o vaciar. *Cancelar* detiene el actual y vacía la cola.
-- **Listas de reproducción**: al usar un enlace de playlist se abre un diálogo para elegir los videos y el modo; se guardan en una subcarpeta con el nombre de la lista.
-- **Subtítulos** (español / inglés): como `.srt` al lado del video o **incrustados** en el MP4.
-- **Cookies del navegador** (Firefox recomendado; Chrome y Edge hay que cerrarlos antes): para videos con restricción de edad o cuando YouTube pide confirmar que no eres un bot.
-- **Actualizar yt-dlp** con un botón, y búsqueda automática una vez al día (desactivable). Funciona también en el `.exe` sin recompilar.
+- **Cola**: es la pestaña principal. Cada descarga muestra su fase (descargando / convirtiendo), porcentaje, velocidad, tiempo restante y su propia ✕. Las terminadas quedan con *Abrir* o *Reintentar* hasta *Vaciar terminados*. *Cancelar todo* detiene la actual y vacía la cola.
+- **Listas de reproducción**: al usar un enlace de playlist se abre un diálogo para elegir los videos y el formato; se guardan en una subcarpeta con el nombre de la lista.
+- **Pie de estado** con la versión de yt-dlp, si hay ffmpeg y qué tarjeta de video se usa.
 
 ### Calidad de vida
 
-- Tema claro/oscuro, carpetas predeterminadas por modo, notificaciones de Windows al terminar.
-- Errores traducidos a español claro (con la causa real cuando falla ffmpeg).
+- Menú **⋯**: tema (automático como Windows, oscuro o claro), carpetas por formato, actualizar el motor de descargas (también automático una vez al día y sin recompilar el `.exe`), instalar ffmpeg y abrir la carpeta de registros.
+- Barra de título del color del tema, progreso en el botón de la barra de tareas y notificación de Windows al terminar si la ventana no está al frente.
+- Avisos dentro de la ventana en lugar de diálogos: falta ffmpeg, hay una actualización lista, etc.
+- **Historial** con *Volver a descargar*.
+- Errores en español claro, sin jerga, cada uno con su acción.
 - Limpieza segura: solo se borran archivos temporales **creados por la propia descarga**; nunca archivos que ya tenías en la carpeta.
 - Log con fecha y rotación en `%LOCALAPPDATA%\VibeLoader\vibeload.log`.
 
@@ -85,7 +100,7 @@ pip install -r requirements-dev.txt
 python vibeload_whatsapp.py
 ```
 
-La primera vez se abre un asistente para elegir la carpeta de cada modo.
+La primera vez se abre un asistente para elegir la carpeta de cada formato.
 
 ### Estructura
 
@@ -96,12 +111,15 @@ vibeloader/
   config.py               constantes y presets
   ytdlp_core.py           descargas, metadatos, subtítulos (yt-dlp)
   ffmpeg_core.py          perfiles, plan copiar/recodificar, hardware, tamaño objetivo
-  jobs.py                 Worker de la cola, metadatos y tareas de fondo
+  jobs.py                 núcleo de un trabajo de descarga (sin Qt: avisa por callbacks)
+  browsers.py             qué navegador usar para la sesión
   updater.py              actualización de yt-dlp e instalación de ffmpeg
   tools.py · urls.py · utils.py · errors.py · logs.py · settings.py · history.py
-  ui/                     vistas, diálogos y estilos
+  ui/                     vistas, diálogos, estilos, adaptador Qt del núcleo
+                          (qt_bridge.py) e integración con Windows
 tests/                    pytest
-assets/                   ícono y splash (originales en assets/source)
+assets/                   ícono y splash (generados por brand/build_playdrop.py)
+brand/                    logo Play-Drop: maestros SVG, kit PNG y guía de marca
 ```
 
 ### Tests
@@ -120,7 +138,8 @@ Doble clic en **`build_vibeload.bat`**. El script:
 2. Corre los tests y **se detiene si algo falla**.
 3. Registra la versión de yt-dlp empaquetada (para el actualizador).
 4. Genera `dist\VibeLoader\VibeLoader.exe` con PyInstaller en modo **carpeta** (arranca rápido; no se descomprime en cada inicio).
-5. Si tienes **Inno Setup** (`winget install JRSoftware.InnoSetup`), crea el instalador `dist\installer\VibeLoader-Setup-<versión>.exe`, que se instala por usuario sin pedir administrador.
+5. Quita las partes de Qt que la app no usa (`scripts\slim_dist.py`: Qt Quick/QML, Qt PDF, OpenGL por software, traducciones). El build baja de ~140 MB a ~93 MB.
+6. Si tienes **Inno Setup** (`winget install JRSoftware.InnoSetup`), crea el instalador `dist\installer\VibeLoader-Setup-<versión>.exe`, que se instala por usuario sin pedir administrador.
 
 El `.exe` no incluye ffmpeg: lo ofrece descargar la primera vez.
 
@@ -128,11 +147,11 @@ El `.exe` no incluye ffmpeg: lo ofrece descargar la primera vez.
 
 ## 🐛 Problemas comunes
 
-- **"YouTube pide confirmar que no eres un bot" / restricción de edad**: en el modo avanzado elige *Cookies del navegador* → Firefox (o cierra Chrome/Edge y elige ese).
-- **Error 403 / "Unable to extract"**: YouTube cambió algo. Usa *Actualizar yt-dlp* y reinicia.
-- **Falta ffmpeg**: usa el botón *Descargar ffmpeg*.
-- **Modo Cursos falla con "Unknown encoder 'libx265'"**: tu ffmpeg no trae H.265. Usa el que descarga VibeLoader.
-- **La conversión por tarjeta de video falla**: VibeLoader reintenta solo con CPU. Si quieres forzarlo, elige *Codificador → Solo CPU*.
+- **"YouTube pide confirmar que no eres un robot" / restricción de edad**: el aviso de error trae el botón *Usar mi sesión de Firefox* (o del navegador que tengas; Chrome y Edge hay que cerrarlos antes). En Avanzado está en el chip *Sesión del navegador*.
+- **Error 403 / "Unable to extract"**: el sitio cambió algo. El aviso trae *Actualizar y reintentar*; al reiniciar, el enlace queda listo para volver a intentarlo. También está en ⋯ › *Actualizar el motor de descargas*.
+- **Falta ffmpeg**: usa el botón *Instalar ffmpeg* del aviso (o ⋯ › *Instalar ffmpeg*).
+- **El formato Cursos falla con "Unknown encoder 'libx265'"**: tu ffmpeg no trae H.265. Usa el que descarga VibeLoader.
+- **La conversión por tarjeta de video falla**: VibeLoader reintenta solo con CPU. Si quieres forzarlo, elige el chip *Aceleración* → *Solo CPU*.
 
 ---
 

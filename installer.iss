@@ -1,5 +1,5 @@
 ; Instalador de VibeLoader (Inno Setup 6). Lo compila build_vibeload.bat:
-;   iscc /DMyAppVersion=3.0 installer.iss
+;   iscc /DMyAppVersion=4.0 installer.iss
 ; Instala por usuario (sin pedir administrador) a partir de dist\VibeLoader\.
 
 #ifndef MyAppVersion

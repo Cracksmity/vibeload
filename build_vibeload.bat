@@ -41,6 +41,10 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   vibeload_whatsapp.py || goto :error
 
 echo.
+echo === Quitar partes de Qt que no se usan ===
+python scripts\slim_dist.py dist\VibeLoader || goto :error
+
+echo.
 echo === Instalador (Inno Setup) ===
 set "ISCC="
 where iscc >nul 2>nul && set "ISCC=iscc"

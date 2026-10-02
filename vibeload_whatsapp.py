@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from PySide6.QtCore import (
@@ -119,6 +120,24 @@ def _merge_meta_impersonate_ytdlp_opts(url: str, ydl_opts: dict) -> dict:
     return ydl_opts
 
 
+def _merge_youtube_opts(url: str, ydl_opts: dict) -> dict:
+    """Configura opciones óptimas para YouTube (player_client y runtime JS)."""
+    if _host_is_youtube(_url_hostname_lower(url)):
+        if "extractor_args" not in ydl_opts:
+            ydl_opts["extractor_args"] = {}
+        if "youtube" not in ydl_opts["extractor_args"]:
+            ydl_opts["extractor_args"]["youtube"] = {}
+        if isinstance(ydl_opts["extractor_args"]["youtube"], dict):
+            if "player_client" not in ydl_opts["extractor_args"]["youtube"]:
+                ydl_opts["extractor_args"]["youtube"]["player_client"] = ["android", "web"]
+
+        node_bin = shutil.which("node")
+        if node_bin and "js_runtimes" not in ydl_opts:
+            ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
+    return ydl_opts
+
+
+
 def _referer_for_image_url(url: str) -> str:
     try:
         host = (urlparse(url).hostname or "").lower()
@@ -176,19 +195,21 @@ def collect_thumbnail_urls(info: dict) -> list:
         out.insert(0, main)
     return out
 
-PRESET_WHATSAPP = "WhatsApp 720p"
-PRESET_MAX = "Máxima calidad (video)"
-PRESET_MP3 = "Solo audio (MP3)"
-PRESET_CAR = "Modo Auto (autoestéreo)"
+PRESET_WHATSAPP = "Modo WhatsApp (Base)"
+PRESET_MAX = "Modo Video Max"
+PRESET_MP3 = "Modo Audio MP3"
+PRESET_CAR = "Modo Auto"
+PRESET_DIRECTO = "Modo Descarga Directa"
 
-ALL_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR)
-ADVANCED_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR)
+ALL_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR, PRESET_DIRECTO)
+ADVANCED_PRESETS = (PRESET_WHATSAPP, PRESET_MAX, PRESET_MP3, PRESET_CAR, PRESET_DIRECTO)
 
 SETTINGS_KEYS = {
     PRESET_WHATSAPP: "dir_whatsapp",
-    PRESET_MAX: "dir_video_hd",
+    PRESET_MAX: "dir_max",
     PRESET_MP3: "dir_mp3",
     PRESET_CAR: "dir_car",
+    PRESET_DIRECTO: "dir_directo",
 }
 
 LOG_FILE_PATH = None
@@ -256,8 +277,24 @@ FRIENDLY_ERRORS = (
         "Ese enlace no está soportado. Prueba con otro de YouTube u otro sitio.",
     ),
     (
-        "ffmpeg",
+        "ffmpeg not found",
         "No se encontró ffmpeg. Instálalo y agrégalo al PATH.",
+    ),
+    (
+        "ffprobe not found",
+        "No se encontró ffprobe. Instálalo y agrégalo al PATH.",
+    ),
+    (
+        "no se encontró 'ffmpeg'",
+        "No se encontró ffmpeg en el PATH del sistema.",
+    ),
+    (
+        "no se encontró ffmpeg",
+        "No se encontró ffmpeg. Instálalo y agrégalo al PATH.",
+    ),
+    (
+        "ffmpeg exited with code",
+        "Error al procesar o recortar el video con FFmpeg. El stream del video puede requerir actualización de yt-dlp.",
     ),
     (
         "WinError 5",
@@ -285,6 +322,8 @@ THEMES = {
         "video_hover": "#44d4d6",
         "car": "#ffb454",
         "car_hover": "#ffc274",
+        "directo": "#a855f7",
+        "directo_hover": "#c084fc",
         "success": "#4ade80",
         "error": "#fb7185",
         "title": "#ffeaa7",
@@ -303,6 +342,8 @@ THEMES = {
         "video_hover": "#1ec0c1",
         "car": "#e08e2a",
         "car_hover": "#eda43d",
+        "directo": "#9333ea",
+        "directo_hover": "#a855f7",
         "success": "#16a34a",
         "error": "#dc2626",
         "title": "#1d1f29",
@@ -490,6 +531,7 @@ def suggested_default_dirs():
         PRESET_MAX: os.path.join(base, "VibeLoader", "HD"),
         PRESET_MP3: music_dir,
         PRESET_CAR: os.path.join(base, "VibeLoader", "Auto"),
+        PRESET_DIRECTO: os.path.join(base, "VibeLoader", "Directo"),
     }
 
 
@@ -503,6 +545,8 @@ def load_default_dirs_from_settings(settings: QSettings):
         return None
     if not out.get(PRESET_CAR):
         out[PRESET_CAR] = suggested_default_dirs()[PRESET_CAR]
+    if not out.get(PRESET_DIRECTO):
+        out[PRESET_DIRECTO] = suggested_default_dirs()[PRESET_DIRECTO]
     return out
 
 
@@ -555,6 +599,7 @@ def _ydl_opts_metadata_only(url: str | None = None):
     }
     if url:
         _merge_meta_impersonate_ytdlp_opts(url, opts)
+        _merge_youtube_opts(url, opts)
     return opts
 
 
@@ -627,34 +672,57 @@ def ffprobe_duration_seconds(path):
         return None
 
 
-def _run_ffmpeg_recompress(
-    src,
-    dst,
-    logger,
-    emit_progress,
-    cancel_event,
-    proc_holder,
-    pct_lo,
-    pct_hi,
-    *,
-    profile,
-    level,
-    max_w,
-    max_h,
-    fps,
-    crf,
-    preset_speed,
-    audio_b,
-    audio_ar,
-    nice_name,
-):
-    logger(f"🎬 Recompresión con ffmpeg ({nice_name})…")
-    duration = ffprobe_duration_seconds(src)
+_H264_720P_VF = (
+    "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,"
+    "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+)
 
-    vf = (
-        f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease,"
-        f"scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    )
+
+@dataclass(frozen=True)
+class FfmpegProfile:
+    nice_name: str
+    vf: str
+    fps: int
+    video_codec: str
+    crf: int
+    preset: str
+    audio_bitrate: str
+    audio_sample_rate: int | None = 48000
+    audio_channels: int = 2
+    h264_profile: str | None = None
+    h264_level: str | None = None
+    extra_video_args: tuple = ()
+
+
+FFMPEG_PROFILE_WHATSAPP = FfmpegProfile(
+    nice_name="WhatsApp / móviles",
+    vf=_H264_720P_VF,
+    fps=30,
+    video_codec="libx264",
+    crf=23,
+    preset="medium",
+    audio_bitrate="128k",
+    audio_sample_rate=48000,
+    h264_profile="main",
+    h264_level="4.0",
+    extra_video_args=("-pix_fmt", "yuv420p"),
+)
+
+FFMPEG_PROFILE_CAR = FfmpegProfile(
+    nice_name="Modo Auto (autoestéreo)",
+    vf=_H264_720P_VF,
+    fps=30,
+    video_codec="libx264",
+    crf=22,
+    preset="medium",
+    audio_bitrate="128k",
+    audio_sample_rate=44100,
+    h264_profile="baseline",
+    h264_level="3.1",
+    extra_video_args=("-pix_fmt", "yuv420p"),
+)
+
+def _build_ffmpeg_cmd(src, dst, profile: FfmpegProfile) -> list:
     cmd = [
         "ffmpeg",
         "-nostdin",
@@ -666,33 +734,58 @@ def _run_ffmpeg_recompress(
         "-i",
         src,
         "-vf",
-        vf,
+        profile.vf,
         "-r",
-        str(fps),
+        str(profile.fps),
         "-c:v",
-        "libx264",
-        "-profile:v",
-        profile,
-        "-level",
-        level,
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        str(crf),
-        "-preset",
-        preset_speed,
-        "-c:a",
-        "aac",
-        "-b:a",
-        audio_b,
-        "-ar",
-        str(audio_ar),
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        dst,
+        profile.video_codec,
     ]
+    if profile.video_codec == "libx264":
+        cmd.extend(
+            ["-profile:v", profile.h264_profile, "-level", profile.h264_level]
+        )
+    if profile.extra_video_args:
+        cmd.extend(profile.extra_video_args)
+    cmd.extend(
+        [
+            "-crf",
+            str(profile.crf),
+            "-preset",
+            profile.preset,
+            "-c:a",
+            "aac",
+            "-b:a",
+            profile.audio_bitrate,
+        ]
+    )
+    if profile.audio_sample_rate is not None:
+        cmd.extend(["-ar", str(profile.audio_sample_rate)])
+    cmd.extend(
+        [
+            "-ac",
+            str(profile.audio_channels),
+            "-movflags",
+            "+faststart",
+            dst,
+        ]
+    )
+    return cmd
+
+
+def _run_ffmpeg(
+    cmd,
+    src,
+    dst,
+    logger,
+    emit_progress,
+    cancel_event,
+    proc_holder,
+    pct_lo,
+    pct_hi,
+    nice_name,
+):
+    logger(f"🎬 Recompresión con ffmpeg ({nice_name})…")
+    duration = ffprobe_duration_seconds(src)
 
     creation = 0
     if sys.platform == "win32":
@@ -758,11 +851,20 @@ def _run_ffmpeg_recompress(
     logger(f"✅ Conversión ffmpeg terminada: {dst}")
 
 
-def run_ffmpeg_whatsapp(
-    src, dst, logger, emit_progress, cancel_event, proc_holder, pct_lo, pct_hi
+def _run_ffmpeg_with_profile(
+    src,
+    dst,
+    logger,
+    emit_progress,
+    cancel_event,
+    proc_holder,
+    pct_lo,
+    pct_hi,
+    profile: FfmpegProfile,
 ):
-    """H.264 Main@L4.0, máx 1280x720, 30 fps, AAC LC 128k, +faststart."""
-    return _run_ffmpeg_recompress(
+    cmd = _build_ffmpeg_cmd(src, dst, profile)
+    return _run_ffmpeg(
+        cmd,
         src,
         dst,
         logger,
@@ -771,16 +873,24 @@ def run_ffmpeg_whatsapp(
         proc_holder,
         pct_lo,
         pct_hi,
-        profile="main",
-        level="4.0",
-        max_w=1280,
-        max_h=720,
-        fps=30,
-        crf=23,
-        preset_speed="medium",
-        audio_b="128k",
-        audio_ar=48000,
-        nice_name="WhatsApp / móviles",
+        profile.nice_name,
+    )
+
+
+def run_ffmpeg_whatsapp(
+    src, dst, logger, emit_progress, cancel_event, proc_holder, pct_lo, pct_hi
+):
+    """H.264 Main@L4.0, máx 1280x720, 30 fps, AAC LC 128k, +faststart."""
+    return _run_ffmpeg_with_profile(
+        src,
+        dst,
+        logger,
+        emit_progress,
+        cancel_event,
+        proc_holder,
+        pct_lo,
+        pct_hi,
+        FFMPEG_PROFILE_WHATSAPP,
     )
 
 
@@ -792,7 +902,7 @@ def run_ffmpeg_car(
     Profile Baseline + level 3.1 dan máxima compatibilidad con autoestéreos y
     reproductores antiguos (sin B-frames, sin CABAC).
     """
-    return _run_ffmpeg_recompress(
+    return _run_ffmpeg_with_profile(
         src,
         dst,
         logger,
@@ -801,16 +911,7 @@ def run_ffmpeg_car(
         proc_holder,
         pct_lo,
         pct_hi,
-        profile="baseline",
-        level="3.1",
-        max_w=1280,
-        max_h=720,
-        fps=30,
-        crf=22,
-        preset_speed="medium",
-        audio_b="128k",
-        audio_ar=44100,
-        nice_name="Modo Auto (autoestéreo)",
+        FFMPEG_PROFILE_CAR,
     )
 
 
@@ -837,12 +938,7 @@ def aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger):
 
         _, download_range_func = _import_ytdlp()
         ydl_opts["download_ranges"] = download_range_func(None, [(s, e)])
-
-        if "extractor_args" not in ydl_opts:
-            ydl_opts["extractor_args"] = {}
-        ydl_opts["extractor_args"]["youtube"] = [
-            "player_client=default,-android_sdkless"
-        ]
+        ydl_opts["force_keyframes_at_cuts"] = True
 
         texto_fin = e if e != float("inf") else "el final"
         logger(f"✂️ Fragmento configurado: de {s}s hasta {texto_fin}s (Corte por Keyframe)")
@@ -877,6 +973,7 @@ def descargar_video_whatsapp(
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
     _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
+    _merge_youtube_opts(url, ydl_opts)
 
     YoutubeDL, _ = _import_ytdlp()
     try:
@@ -931,6 +1028,7 @@ def descargar_video_car(
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
     _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
+    _merge_youtube_opts(url, ydl_opts)
 
     YoutubeDL, _ = _import_ytdlp()
     try:
@@ -1004,6 +1102,7 @@ def descargar_video_max_calidad(
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
     _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
+    _merge_youtube_opts(url, ydl_opts)
 
     YoutubeDL, _ = _import_ytdlp()
     try:
@@ -1028,6 +1127,56 @@ def descargar_video_max_calidad(
 
     logger(f"✅ Descarga en máxima calidad terminada: {final_path}")
     return final_path
+
+
+def descargar_video_directo(
+    url,
+    carpeta_salida,
+    start_time=None,
+    end_time=None,
+    logger=print,
+    cancel_event=None,
+    emit_progress=None,
+):
+    logger("🎥 Iniciando descarga directa (720p SDR, sin recodificar) con yt-dlp…")
+    os.makedirs(carpeta_salida, exist_ok=True)
+
+    # Solo formato que tenga video+audio integrado, de hasta 720p, mp4
+    fmt = "b[height<=720][ext=mp4]/b[ext=mp4]/b"
+
+    ydl_opts = {
+        "outtmpl": os.path.join(carpeta_salida, "%(title)s.%(ext)s"),
+        "format": fmt,
+        "noplaylist": True,
+    }
+    if cancel_event is not None or emit_progress is not None:
+        ydl_opts["progress_hooks"] = [
+            make_ydl_progress_hook(cancel_event, 0, 95, emit_progress)
+        ]
+
+    ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
+    _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
+    _merge_youtube_opts(url, ydl_opts)
+
+    YoutubeDL, _ = _import_ytdlp()
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        msg = str(e).lower()
+        if ("impersonate target" in msg or "impersonate" in msg) and "impersonate" in ydl_opts:
+            logger("⚠️ Impersonate no disponible en esta build; reintentando sin impersonate…")
+            ydl_opts2 = dict(ydl_opts)
+            ydl_opts2.pop("impersonate", None)
+            with YoutubeDL(ydl_opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise
+
+    logger(f"✅ Descarga directa terminada: {filename}")
+    return filename
 
 
 def descargar_audio_mp3(
@@ -1065,6 +1214,7 @@ def descargar_audio_mp3(
 
     ydl_opts = aplicar_rangos_de_tiempo(ydl_opts, start_time, end_time, logger)
     _merge_meta_impersonate_ytdlp_opts(url, ydl_opts)
+    _merge_youtube_opts(url, ydl_opts)
 
     YoutubeDL, _ = _import_ytdlp()
     try:
@@ -1319,6 +1469,20 @@ class Worker(QObject):
                 emit_progress(100, "Listo")
                 logger("✨ Listo. Video descargado en la mejor calidad.")
 
+            elif self.preset == PRESET_DIRECTO:
+                fname = descargar_video_directo(
+                    self.url,
+                    self.carpeta_salida,
+                    self.start_time,
+                    self.end_time,
+                    logger=logger,
+                    cancel_event=self._cancel_event,
+                    emit_progress=emit_progress,
+                )
+                result_path = fname
+                emit_progress(100, "Listo")
+                logger("✨ Listo. Video descargado directamente sin recodificar.")
+
             elif self.preset == PRESET_MP3:
                 fname = descargar_audio_mp3(
                     self.url,
@@ -1413,6 +1577,7 @@ class DefaultFoldersConfigDialog(QDialog):
         (PRESET_MAX, "Videos en máxima calidad:"),
         (PRESET_MP3, "Música / MP3:"),
         (PRESET_CAR, "Videos para Modo Auto (autoestéreo):"),
+        (PRESET_DIRECTO, "Videos en Modo Descarga Directa:"),
     )
 
     def __init__(self, parent, paths: dict, first_run: bool = False):
@@ -1525,6 +1690,8 @@ def build_stylesheet(theme_name: str) -> str:
         QPushButton#big_video:hover {{ background-color: {t['video_hover']}; }}
         QPushButton#big_car {{ background-color: {t['car']}; min-height: 64px; font-size: 13pt; }}
         QPushButton#big_car:hover {{ background-color: {t['car_hover']}; }}
+        QPushButton#big_directo {{ background-color: {t['directo']}; min-height: 64px; font-size: 13pt; }}
+        QPushButton#big_directo:hover {{ background-color: {t['directo_hover']}; }}
         QProgressBar {{
             background-color: {t['surface']};
             color: {t['text']};
@@ -1601,7 +1768,7 @@ def build_stylesheet(theme_name: str) -> str:
 
 
 class SimpleView(QWidget):
-    """Pegar enlace -> elegir Música / Video / Auto -> descargar."""
+    """Pegar enlace -> elegir Música / Video / Auto / Cursos -> descargar."""
 
     request_fetch_metadata = Signal(str, int)
     request_open_advanced = Signal()
@@ -1703,10 +1870,12 @@ class SimpleView(QWidget):
         prev_layout.addLayout(text_col, 1)
         layout.addWidget(self.preview)
 
-        # Action buttons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
+        # Action buttons (grid 2×2)
+        btn_grid = QVBoxLayout()
+        btn_grid.setSpacing(12)
 
+        row_top = QHBoxLayout()
+        row_top.setSpacing(12)
         self.btn_music = QPushButton("Descargar Música\n(MP3)")
         self.btn_music.setObjectName("big_music")
         self.btn_music.clicked.connect(lambda: self._start(PRESET_MP3))
@@ -1722,10 +1891,27 @@ class SimpleView(QWidget):
         )
         self.btn_car.clicked.connect(lambda: self._start(PRESET_CAR))
 
-        for b in (self.btn_music, self.btn_video, self.btn_car):
+        self.btn_directo = QPushButton("Descarga Directa\n(720p sin recodificar)")
+        self.btn_directo.setObjectName("big_directo")
+        self.btn_directo.setToolTip(
+            "Descarga directa desde YouTube en 720p SDR, evita el sobrecalentamiento del CPU"
+        )
+        self.btn_directo.clicked.connect(lambda: self._start(PRESET_DIRECTO))
+
+        for b in (self.btn_music, self.btn_video, self.btn_directo, self.btn_car):
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn_row.addWidget(b)
-        layout.addLayout(btn_row)
+        
+        row_mid = QHBoxLayout()
+        row_mid.setSpacing(12)
+        
+        row_top.addWidget(self.btn_music)
+        row_top.addWidget(self.btn_video)
+        row_mid.addWidget(self.btn_directo)
+        row_mid.addWidget(self.btn_car)
+        
+        btn_grid.addLayout(row_top)
+        btn_grid.addLayout(row_mid)
+        layout.addLayout(btn_grid)
 
         # Folder hint
         folder_row = QHBoxLayout()
@@ -1811,6 +1997,7 @@ class SimpleView(QWidget):
             self.btn_music,
             self.btn_video,
             self.btn_car,
+            self.btn_directo,
             self.url_edit,
             self.paste_btn,
             self.change_folder_btn,
@@ -1870,6 +2057,8 @@ class SimpleView(QWidget):
             parts.append(f"Video → {os.path.basename(dirs[PRESET_MAX])}")
         if dirs.get(PRESET_CAR):
             parts.append(f"Auto → {os.path.basename(dirs[PRESET_CAR])}")
+        if dirs.get(PRESET_DIRECTO):
+            parts.append(f"Directo → {os.path.basename(dirs[PRESET_DIRECTO])}")
         self.folder_hint.setText("Se guardará en: " + " · ".join(parts) if parts else "")
 
     def set_recents(self, urls):

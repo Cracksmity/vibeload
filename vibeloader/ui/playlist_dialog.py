@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..config import preset_label
 from ..utils import format_duration
 
 
@@ -56,10 +57,13 @@ class PlaylistDialog(QDialog):
         layout.addLayout(sel)
 
         opts = QHBoxLayout()
-        opts.addWidget(QLabel("Modo:"))
+        opts.addWidget(QLabel("Formato:"))
         self.preset_combo = QComboBox()
-        self.preset_combo.addItems(list(presets))
-        self.preset_combo.setCurrentText(preset)
+        for p in presets:
+            self.preset_combo.addItem(preset_label(p), p)
+        idx = self.preset_combo.findData(preset)
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
         opts.addWidget(self.preset_combo, 1)
         layout.addLayout(opts)
 
@@ -96,7 +100,7 @@ class PlaylistDialog(QDialog):
         ]
 
     def preset(self) -> str:
-        return self.preset_combo.currentText()
+        return self.preset_combo.currentData()
 
     def use_subfolder(self) -> bool:
         return self.subfolder_chk.isChecked()

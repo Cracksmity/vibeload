@@ -272,7 +272,7 @@ def make_ydl_progress_hook(cancel_event, pct_lo, pct_hi, emit):
                 msg += f" · {speed}"
             if eta and eta.lower() not in ("unknown", "--:--"):
                 msg += f" · quedan {eta}"
-            emit(min(p, pct_hi), msg)
+            emit(min(p, pct_hi), msg, speed=d.get("speed"), eta=d.get("eta"))
         elif st == "finished":
             emit(hi, f"{label}: terminado")
 
@@ -291,7 +291,7 @@ def make_pp_hook(cancel_event, pct_hi, emit):
         if cancel_event is not None and cancel_event.is_set():
             raise UserCancelledError("Cancelado por el usuario")
         if emit is not None and d.get("status") == "started":
-            emit(pct_hi, names.get(d.get("postprocessor"), "Postproceso…"))
+            emit(pct_hi, names.get(d.get("postprocessor"), "Postproceso…"), phase="convirtiendo")
 
     return hook
 

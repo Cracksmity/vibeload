@@ -4,7 +4,7 @@ import sys
 
 SETTINGS_ORG = "VibeLoader"
 SETTINGS_APP = "VibeLoader"
-APP_VERSION = "3.0"
+APP_VERSION = "4.0"
 
 # Cabeceras tipo navegador (YouTube / CDNs suelen bloquear User-Agent genérico de Python)
 BROWSER_UA = (
@@ -37,6 +37,26 @@ ALL_PRESETS = (
     PRESET_TAMANO,
 )
 ADVANCED_PRESETS = ALL_PRESETS
+
+# Nombres que ve el usuario. Los identificadores de arriba no cambian porque
+# están guardados en el historial y en la configuración.
+PRESET_LABELS = {
+    PRESET_WHATSAPP: "WhatsApp",
+    PRESET_MAX: "Máxima calidad (hasta 1080p)",
+    PRESET_MP3: "Solo audio (MP3)",
+    PRESET_CAR: "Para el auto (USB)",
+    PRESET_DIRECTO: "Compatible 720p (sin convertir)",
+    PRESET_CURSOS: "Cursos (H.265, ahorra espacio)",
+    PRESET_TAMANO: "Ajustar a un peso",
+}
+
+# Formatos del menú «Más formatos» del Modo Simple (los dos principales son
+# Video = PRESET_MAX y Solo audio = PRESET_MP3).
+SIMPLE_EXTRA_PRESETS = (PRESET_CAR, PRESET_DIRECTO, PRESET_WHATSAPP)
+
+
+def preset_label(preset: str) -> str:
+    return PRESET_LABELS.get(preset, preset)
 
 # Tamaños sugeridos para el Modo Tamaño Máximo (MB).
 TARGET_SIZE_CHOICES = ("16", "25", "50", "64", "100", "500")

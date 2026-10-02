@@ -1,19 +1,22 @@
-"""Vista avanzada: presets, recortes, opciones, cola y log."""
+"""Vista avanzada: una fila de mando, opciones como chips y la cola como protagonista."""
 import os
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -21,15 +24,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..browsers import browser_display_name
 from ..config import (
     ADVANCED_PRESETS,
     DEFAULT_TARGET_SIZE_MB,
+    PRESET_MAX,
     PRESET_TAMANO,
     TARGET_SIZE_CHOICES,
+    preset_label,
 )
 from ..errors import friendly
-from ..jobs import SUBS_EMBED, SUBS_NONE, SUBS_SRT, JobOptions
+from ..jobs import PHASE_CONVERTING, PHASE_DOWNLOADING, SUBS_EMBED, SUBS_NONE, SUBS_SRT, JobOptions
 from ..urls import find_url_in_text, is_http_url
+from .widgets import Chip, ElidedLabel, FlowLayout, Popover, repolish
 
 COOKIE_BROWSERS = (
     ("No usar", None),
@@ -49,234 +56,403 @@ SUBS_LANGS = (
     ("Inglés", ("en",)),
     ("Español e inglés", ("es", "en")),
 )
+ENCODERS = (
+    ("GPU automática (más rápido)", "auto"),
+    ("Solo CPU (más lento, archivos algo más chicos)", "cpu"),
+)
+
+
+def format_speed(bps: float | None) -> str:
+    if not bps:
+        return ""
+    mb = bps / 1_000_000
+    return f"{mb:.1f} MB/s".replace(".", ",") if mb < 100 else f"{mb:.0f} MB/s"
+
+
+def format_clock(seconds: float | None) -> str:
+    if seconds is None:
+        return ""
+    s = int(seconds)
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def _combo(items) -> QComboBox:
+    c = QComboBox()
+    for label, value in items:
+        c.addItem(label, value)
+    return c
+
+
+def _select(combo: QComboBox, value):
+    i = combo.findData(value)
+    if i >= 0:
+        combo.setCurrentIndex(i)
+
+
+class QueueRow(QFrame):
+    """Una fila de la cola: título, formato, fase, progreso y su acción."""
+
+    action = Signal(int, str)  # id del trabajo, acción (cancel | remove | retry | open)
+
+    def __init__(self, job, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QueueRow")
+        self.job_id = job.id
+        grid = QGridLayout(self)
+        grid.setContentsMargins(10, 8, 6, 8)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(2)
+        self.title = ElidedLabel("")
+        self.title.setObjectName("RowTitle")
+        self.meta = ElidedLabel("")
+        self.meta.setObjectName("RowMeta")
+        grid.addWidget(self.title, 0, 0)
+        grid.addWidget(self.meta, 1, 0)
+        status_row = QHBoxLayout()
+        self.phase = QLabel("")
+        self.phase.setObjectName("RowStatus")
+        self.numbers = QLabel("")
+        self.numbers.setObjectName("RowStatus")
+        status_row.addWidget(self.phase)
+        status_row.addStretch()
+        status_row.addWidget(self.numbers)
+        grid.addLayout(status_row, 0, 1)
+        self.bar = QProgressBar()
+        self.bar.setObjectName("thin")
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        grid.addWidget(self.bar, 1, 1)
+        self.btn = QToolButton()
+        self.btn.setObjectName("RowAction")
+        self.btn.clicked.connect(self._on_click)
+        grid.addWidget(self.btn, 0, 2, 2, 1)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 2)
+        grid.setColumnMinimumWidth(1, 200)
+        self._action = ""
+        self.update_from(job)
+
+    def update_from(self, job):
+        self.title.setText(job.title or job.url)
+        trim = ""
+        if job.start or job.end:
+            trim = f"{job.start or '0:00'}–{job.end or 'fin'}"
+        folder = os.path.basename(os.path.normpath(job.folder)) if job.folder else ""
+        self.meta.setText(" · ".join(x for x in (preset_label(job.preset), trim, folder) if x))
+        st = job.status
+        kind = ""
+        self.bar.setVisible(st in ("descargando", "en cola"))
+        self.setProperty("active", "true" if st == "descargando" else "false")
+        if st == "descargando":
+            info = job.progress
+            pct = info.pct if info else 0
+            self.bar.setValue(pct)
+            if info is None:
+                phase = "Preparando"
+            elif info.phase == PHASE_CONVERTING:
+                phase = "Convirtiendo"
+            elif info.phase == PHASE_DOWNLOADING:
+                phase = "Descargando"
+            else:
+                phase = "Preparando"
+            self.phase.setText(phase)
+            extra = format_speed(info.speed) if info else ""
+            eta = format_clock(info.eta) if info and info.eta is not None else ""
+            self.numbers.setText("  ".join(x for x in (f"{pct} %", extra, eta) if x))
+            self.numbers.setToolTip(info.text if info else "")
+            self._set_action("cancel", "✕", "Cancelar esta descarga")
+        elif st == "en cola":
+            self.bar.setValue(0)
+            self.phase.setText("En espera")
+            self.numbers.setText("")
+            self._set_action("remove", "✕", "Quitar de la cola")
+        elif st == "listo":
+            kind = "ok"
+            self.phase.setText("✓ Listo")
+            self.numbers.setText("")
+            self._set_action("open", "Abrir", job.result_path)
+        elif st == "lista":
+            self.phase.setText("Lista de reproducción: elige los videos")
+            self.numbers.setText("")
+            self._set_action("", "", "")
+        else:  # error | cancelado
+            kind = "error"
+            text = "Cancelado" if st == "cancelado" else friendly(job.error)
+            self.phase.setText(text)
+            self.phase.setToolTip(job.error)
+            self.numbers.setText("")
+            self._set_action("retry", "Reintentar", "Volver a intentarlo")
+        for lab in (self.phase, self.numbers):
+            lab.setProperty("kind", kind)
+            repolish(lab)
+        repolish(self)
+
+    def _set_action(self, action, text, tip):
+        self._action = action
+        self.btn.setVisible(bool(action))
+        self.btn.setText(text)
+        self.btn.setToolTip(tip)
+
+    def _on_click(self):
+        if self._action:
+            self.action.emit(self.job_id, self._action)
 
 
 class AdvancedView(QWidget):
-    """Vista con todos los controles: presets, recortes, carpeta, opciones, cola y log."""
-
-    request_open_simple = Signal()
     request_open_folders = Signal()
-    request_open_history = Signal()
-    request_toggle_theme = Signal()
     request_start = Signal(str, str, str, str, str)  # url, preset, folder, start, end
-    request_cancel = Signal()
-    request_remove_queued = Signal(int)  # id del trabajo
-    request_clear_queue = Signal()
-    request_update_ytdlp = Signal()
-    request_install_ffmpeg = Signal()
-    auto_update_toggled = Signal(bool)
+    request_job_action = Signal(int, str)  # id, cancel | remove | retry | open
+    request_cancel_all = Signal()
+    request_clear_finished = Signal()
     options_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("AdvancedView")
         self.setAcceptDrops(True)
         self._is_busy = False
         self._default_dirs = {}
+        self._folder = ""
+        self._folder_custom = False
+        self._rows = {}
         self._build_ui()
 
+    # ---------- UI ----------
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Top bar
-        top = QHBoxLayout()
-        title = QLabel("VibeLoader · Modo avanzado")
-        title.setObjectName("TitleLabel")
-        top.addWidget(title)
-        top.addStretch()
-        self.history_btn = QToolButton()
-        self.history_btn.setText("Historial")
-        self.history_btn.clicked.connect(self.request_open_history)
-        top.addWidget(self.history_btn)
-        self.theme_btn = QToolButton()
-        self.theme_btn.setText("Tema")
-        self.theme_btn.clicked.connect(self.request_toggle_theme)
-        top.addWidget(self.theme_btn)
-        self.simple_btn = QToolButton()
-        self.simple_btn.setText("Modo simple")
-        self.simple_btn.clicked.connect(self.request_open_simple)
-        top.addWidget(self.simple_btn)
-        layout.addLayout(top)
+        top = QVBoxLayout()
+        top.setContentsMargins(16, 12, 16, 10)
+        top.setSpacing(10)
+        root.addLayout(top)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
-        row = 0
-
-        # URL
-        grid.addWidget(QLabel("URL:"), row, 0)
+        # Enlace + acción principal
+        url_row = QHBoxLayout()
+        url_row.setSpacing(8)
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("Pega aquí la URL (video o lista de reproducción)")
-        grid.addWidget(self.url_edit, row, 1, 1, 3)
-        row += 1
+        self.url_edit.setPlaceholderText("Pega el enlace (video o lista de reproducción)")
+        self.url_edit.setAccessibleName("Enlace")
+        self.url_edit.setClearButtonEnabled(True)
+        self.url_edit.returnPressed.connect(self._on_start)
+        url_row.addWidget(self.url_edit, 1)
+        paste = QPushButton("Pegar")
+        paste.setObjectName("secondary")
+        paste.clicked.connect(self._do_paste)
+        url_row.addWidget(paste)
+        self.start_btn = QPushButton("Descargar")
+        self.start_btn.setToolTip("Ctrl+Enter")
+        self.start_btn.clicked.connect(self._on_start)
+        url_row.addWidget(self.start_btn)
+        top.addLayout(url_row)
 
-        # Recortes
-        grid.addWidget(QLabel("Recortar:"), row, 0)
-        time_layout = QHBoxLayout()
-        self.start_edit = QLineEdit()
-        self.start_edit.setPlaceholderText("Inicio (ej. 0:45)")
-        self.start_edit.setFixedWidth(130)
-        self.end_edit = QLineEdit()
-        self.end_edit.setPlaceholderText("Fin (ej. 1:30)")
-        self.end_edit.setFixedWidth(130)
-        time_layout.addWidget(self.start_edit)
-        time_layout.addWidget(QLabel(" a "))
-        time_layout.addWidget(self.end_edit)
-        time_layout.addWidget(QLabel("(opcional)"))
-        time_layout.addStretch()
-        grid.addLayout(time_layout, row, 1, 1, 3)
-        row += 1
-
-        # Carpeta de salida
-        grid.addWidget(QLabel("Carpeta:"), row, 0)
-        out_layout = QHBoxLayout()
-        self.out_edit = QLineEdit()
-        self.out_edit.setPlaceholderText("Elige dónde guardar el archivo…")
-        browse_btn = QPushButton("Examinar")
-        browse_btn.setObjectName("secondary")
-        browse_btn.clicked.connect(self._elegir_carpeta)
-        defaults_btn = QPushButton("Carpetas…")
-        defaults_btn.setObjectName("secondary")
-        defaults_btn.setToolTip("Cambiar las carpetas predeterminadas de cada modo")
-        defaults_btn.clicked.connect(self.request_open_folders)
-        out_layout.addWidget(self.out_edit, 1)
-        out_layout.addWidget(browse_btn)
-        out_layout.addWidget(defaults_btn)
-        grid.addLayout(out_layout, row, 1, 1, 3)
-        row += 1
-
-        # Modo + tamaño
-        grid.addWidget(QLabel("Modo:"), row, 0)
-        preset_layout = QHBoxLayout()
+        # Campos: formato, peso, carpeta
+        fields = QHBoxLayout()
+        fields.setSpacing(8)
+        fmt = QFrame()
+        fmt.setObjectName("Field")
+        fl = QHBoxLayout(fmt)
+        fl.setContentsMargins(10, 0, 2, 0)
+        fl.setSpacing(2)
+        lab = QLabel("Formato")
+        lab.setObjectName("FieldLabel")
+        fl.addWidget(lab)
         self.preset_combo = QComboBox()
-        self.preset_combo.addItems(list(ADVANCED_PRESETS))
-        self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
-        preset_layout.addWidget(self.preset_combo, 1)
-        self.size_label = QLabel("Peso máx. (MB):")
+        self.preset_combo.setObjectName("FieldCombo")
+        for p in ADVANCED_PRESETS:
+            self.preset_combo.addItem(preset_label(p), p)
+        _select(self.preset_combo, PRESET_MAX)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        fl.addWidget(self.preset_combo)
+        fields.addWidget(fmt)
+
+        self.size_field = QFrame()
+        self.size_field.setObjectName("Field")
+        sl = QHBoxLayout(self.size_field)
+        sl.setContentsMargins(10, 0, 2, 0)
+        sl.setSpacing(2)
+        slab = QLabel("Peso ≤")
+        slab.setObjectName("FieldLabel")
+        sl.addWidget(slab)
         self.size_combo = QComboBox()
+        self.size_combo.setObjectName("FieldCombo")
         self.size_combo.setEditable(True)
         self.size_combo.addItems(list(TARGET_SIZE_CHOICES))
         self.size_combo.setCurrentText(f"{DEFAULT_TARGET_SIZE_MB:g}")
-        self.size_combo.setFixedWidth(100)
-        self.size_combo.setToolTip("WhatsApp: hasta 2 GB · Discord gratis: 10 MB · correo: ~25 MB")
-        preset_layout.addWidget(self.size_label)
-        preset_layout.addWidget(self.size_combo)
-        grid.addLayout(preset_layout, row, 1, 1, 3)
-        row += 1
+        self.size_combo.setFixedWidth(80)
+        self.size_combo.setToolTip("En MB. WhatsApp: hasta 2 GB · Discord gratis: 10 MB · correo: ~25 MB")
+        sl.addWidget(self.size_combo)
+        mb = QLabel("MB")
+        mb.setObjectName("FieldLabel")
+        sl.addWidget(mb)
+        fields.addWidget(self.size_field)
 
-        # Codificador + cookies
-        grid.addWidget(QLabel("Codificador:"), row, 0)
-        self.encoder_combo = QComboBox()
-        self.encoder_combo.addItem("Automático (tarjeta de video si se puede)", "auto")
-        self.encoder_combo.addItem("Solo CPU (más lento, archivos algo más chicos)", "cpu")
-        grid.addWidget(self.encoder_combo, row, 1)
-        grid.addWidget(QLabel("Cookies del navegador:"), row, 2)
-        self.cookies_combo = QComboBox()
-        for label, value in COOKIE_BROWSERS:
-            self.cookies_combo.addItem(label, value)
-        self.cookies_combo.setToolTip(
-            "Usa tu sesión del navegador para videos con restricción de edad o cuando "
-            "YouTube pide confirmar que no eres un bot. Chrome y Edge bloquean sus "
-            "cookies mientras están abiertos: ciérralos antes de descargar."
-        )
-        grid.addWidget(self.cookies_combo, row, 3)
-        row += 1
+        self.folder_btn = QPushButton()
+        self.folder_btn.setObjectName("FolderButton")
+        self.folder_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        menu = QMenu(self.folder_btn)
+        menu.addAction("Elegir otra carpeta…", self._choose_folder)
+        self._reset_folder_act = menu.addAction("Usar la carpeta de este formato", self._reset_folder)
+        menu.addAction("Abrir esta carpeta", self._open_folder)
+        menu.addSeparator()
+        menu.addAction("Carpetas por formato…", self.request_open_folders)
+        self.folder_btn.setMenu(menu)
+        fields.addWidget(self.folder_btn, 1)
+        top.addLayout(fields)
 
-        # Subtítulos
-        grid.addWidget(QLabel("Subtítulos:"), row, 0)
-        self.subs_mode_combo = QComboBox()
-        for label, value in SUBS_MODES:
-            self.subs_mode_combo.addItem(label, value)
-        grid.addWidget(self.subs_mode_combo, row, 1)
-        grid.addWidget(QLabel("Idioma:"), row, 2)
-        self.subs_lang_combo = QComboBox()
-        for label, value in SUBS_LANGS:
-            self.subs_lang_combo.addItem(label, value)
-        grid.addWidget(self.subs_lang_combo, row, 3)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-        layout.addLayout(grid)
+        # Chips
+        chips_host = QWidget()
+        chips = FlowLayout(chips_host, spacing=8)
+        self._build_chips(chips)
+        top.addWidget(chips_host)
 
-        for combo in (self.encoder_combo, self.cookies_combo, self.subs_mode_combo, self.subs_lang_combo):
-            combo.currentIndexChanged.connect(lambda _i: self.options_changed.emit())
-        self.subs_mode_combo.currentIndexChanged.connect(self._update_subs_enabled)
-        self._update_subs_enabled()
-        self._update_size_visibility(self.preset_combo.currentText())
-
-        # Acción
-        action = QHBoxLayout()
-        self.start_btn = QPushButton("Descargar")
-        self.start_btn.clicked.connect(self._on_start)
-        self.cancel_btn = QPushButton("Cancelar")
-        self.cancel_btn.setObjectName("secondary")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.setToolTip("Cancela la descarga actual y vacía la cola")
-        self.cancel_btn.clicked.connect(self.request_cancel)
-        action.addWidget(self.start_btn)
-        action.addWidget(self.cancel_btn)
-        layout.addLayout(action)
-
-        # Progreso
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFormat("Esperando…")
-        layout.addWidget(self.progress)
-
-        # Herramientas
-        tools_row = QHBoxLayout()
-        self.update_btn = QPushButton("Actualizar yt-dlp")
-        self.update_btn.setObjectName("secondary")
-        self.update_btn.setToolTip("Descarga la versión más nueva (YouTube cambia seguido)")
-        self.update_btn.clicked.connect(self.request_update_ytdlp)
-        self.ffmpeg_btn = QPushButton("Descargar ffmpeg")
-        self.ffmpeg_btn.setObjectName("secondary")
-        self.ffmpeg_btn.setToolTip("Instala ffmpeg en la carpeta de VibeLoader (no toca el sistema)")
-        self.ffmpeg_btn.clicked.connect(self.request_install_ffmpeg)
-        self.auto_update_chk = QCheckBox("Buscar actualizaciones de yt-dlp al iniciar")
-        self.auto_update_chk.toggled.connect(self.auto_update_toggled)
-        tools_row.addWidget(self.update_btn)
-        tools_row.addWidget(self.ffmpeg_btn)
-        tools_row.addWidget(self.auto_update_chk)
-        tools_row.addStretch()
-        layout.addLayout(tools_row)
-
-        # Registro y cola en pestañas (ahorra espacio vertical)
+        # Cola y registro
         self.tabs = QTabWidget()
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setPlaceholderText("Aquí aparecerán los detalles del proceso…")
-        self.tabs.addTab(self.log_box, "Registro")
-
+        self.tabs.setDocumentMode(True)
         queue_page = QWidget()
         ql = QVBoxLayout(queue_page)
-        ql.setContentsMargins(0, 6, 0, 0)
+        ql.setContentsMargins(8, 6, 8, 0)
         self.queue_list = QListWidget()
-        self.queue_list.itemSelectionChanged.connect(self._update_queue_buttons)
+        self.queue_list.setObjectName("Queue")
+        self.queue_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.queue_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         ql.addWidget(self.queue_list, 1)
-        qb = QHBoxLayout()
-        self.remove_queued_btn = QPushButton("Quitar de la cola")
-        self.remove_queued_btn.setObjectName("secondary")
-        self.remove_queued_btn.clicked.connect(self._on_remove_queued)
-        self.clear_queue_btn = QPushButton("Vaciar cola")
-        self.clear_queue_btn.setObjectName("secondary")
-        self.clear_queue_btn.clicked.connect(self.request_clear_queue)
-        qb.addWidget(self.remove_queued_btn)
-        qb.addWidget(self.clear_queue_btn)
-        qb.addStretch()
-        ql.addLayout(qb)
+        self.empty_label = QLabel("La cola está vacía. Pega un enlace y pulsa Descargar.")
+        self.empty_label.setObjectName("EmptyQueue")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ql.addWidget(self.empty_label, 1)
         self.tabs.addTab(queue_page, "Cola")
-        layout.addWidget(self.tabs, 1)
-        self.set_queue([], None)
+        self.log_box = QTextEdit()
+        self.log_box.setObjectName("Log")
+        self.log_box.setReadOnly(True)
+        self.log_box.setPlaceholderText("Aquí aparecen los detalles técnicos de cada descarga.")
+        log_page = QWidget()
+        lgl = QVBoxLayout(log_page)
+        lgl.setContentsMargins(16, 0, 16, 0)
+        lgl.addWidget(self.log_box)
+        self.tabs.addTab(log_page, "Registro")
 
-    # ---------- Public API ----------
+        corner = QWidget()
+        cl = QHBoxLayout(corner)
+        cl.setContentsMargins(0, 0, 8, 0)
+        cl.setSpacing(2)
+        self.cancel_all_btn = QPushButton("Cancelar todo")
+        self.cancel_all_btn.setObjectName("ghost")
+        self.cancel_all_btn.setToolTip("Cancela la descarga actual y vacía la cola")
+        self.cancel_all_btn.clicked.connect(self.request_cancel_all)
+        self.clear_done_btn = QPushButton("Vaciar terminados")
+        self.clear_done_btn.setObjectName("ghost")
+        self.clear_done_btn.clicked.connect(self.request_clear_finished)
+        cl.addWidget(self.cancel_all_btn)
+        cl.addWidget(self.clear_done_btn)
+        self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        tabs_wrap = QVBoxLayout()
+        tabs_wrap.setContentsMargins(8, 0, 0, 0)
+        tabs_wrap.addWidget(self.tabs)
+        root.addLayout(tabs_wrap, 1)
+
+        # Pie
+        foot = QFrame()
+        foot.setObjectName("Footer")
+        foot.setFixedHeight(28)
+        fl2 = QHBoxLayout(foot)
+        fl2.setContentsMargins(16, 0, 16, 0)
+        self.tools_label = QLabel("")
+        self.tools_label.setObjectName("FooterText")
+        self.queue_label = QLabel("")
+        self.queue_label.setObjectName("FooterText")
+        fl2.addWidget(self.tools_label)
+        fl2.addStretch()
+        fl2.addWidget(self.queue_label)
+        root.addWidget(foot)
+
+        QShortcut(QKeySequence("Ctrl+Return"), self, self._on_start)
+        QShortcut(QKeySequence("Ctrl+Enter"), self, self._on_start)
+        self._on_preset_changed()
+        self.set_queue([])
+
+    def _build_chips(self, flow):
+        # Recortar
+        pop = Popover(self)
+        title = QLabel("Recortar")
+        title.setObjectName("PopoverTitle")
+        pop.content.addWidget(title)
+        row = QHBoxLayout()
+        self.start_edit = QLineEdit()
+        self.start_edit.setPlaceholderText("Desde 0:45")
+        self.end_edit = QLineEdit()
+        self.end_edit.setPlaceholderText("Hasta 1:30")
+        for e in (self.start_edit, self.end_edit):
+            e.setFixedWidth(110)
+            e.textChanged.connect(self._refresh_chips)
+        row.addWidget(self.start_edit)
+        row.addWidget(QLabel("→"))
+        row.addWidget(self.end_edit)
+        pop.content.addLayout(row)
+        hint = QLabel("Minutos:segundos o h:mm:ss. Deja uno vacío para ir desde el inicio o hasta el final.")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        hint.setFixedWidth(260)
+        pop.content.addWidget(hint)
+        self.trim_chip = Chip("✂ Recortar", pop)
+        self.trim_chip.cleared.connect(self._clear_trim)
+        flow.addWidget(self.trim_chip)
+
+        # Subtítulos
+        pop = Popover(self)
+        t = QLabel("Subtítulos")
+        t.setObjectName("PopoverTitle")
+        pop.content.addWidget(t)
+        self.subs_mode_combo = _combo(SUBS_MODES)
+        self.subs_lang_combo = _combo(SUBS_LANGS)
+        pop.content.addWidget(self.subs_mode_combo)
+        pop.content.addWidget(self.subs_lang_combo)
+        self.subs_chip = Chip("CC Subtítulos", pop)
+        self.subs_chip.cleared.connect(lambda: _select(self.subs_mode_combo, SUBS_NONE))
+        flow.addWidget(self.subs_chip)
+
+        # Sesión del navegador
+        pop = Popover(self)
+        t = QLabel("Sesión del navegador")
+        t.setObjectName("PopoverTitle")
+        pop.content.addWidget(t)
+        self.cookies_combo = _combo(COOKIE_BROWSERS)
+        pop.content.addWidget(self.cookies_combo)
+        info = QLabel(
+            "Para videos con restricción de edad o cuando YouTube pide confirmar que no "
+            "eres un robot. Chrome y Edge bloquean su sesión mientras están abiertos."
+        )
+        info.setObjectName("Hint")
+        info.setWordWrap(True)
+        info.setFixedWidth(280)
+        pop.content.addWidget(info)
+        self.cookies_chip = Chip("Sesión del navegador", pop)
+        self.cookies_chip.cleared.connect(lambda: _select(self.cookies_combo, None))
+        flow.addWidget(self.cookies_chip)
+
+        # Aceleración
+        pop = Popover(self)
+        t = QLabel("Aceleración al convertir")
+        t.setObjectName("PopoverTitle")
+        pop.content.addWidget(t)
+        self.encoder_combo = _combo(ENCODERS)
+        pop.content.addWidget(self.encoder_combo)
+        self.encoder_chip = Chip("Aceleración: GPU", pop)
+        self.encoder_chip.cleared.connect(lambda: _select(self.encoder_combo, "auto"))
+        flow.addWidget(self.encoder_chip)
+
+        for combo in (self.encoder_combo, self.cookies_combo, self.subs_mode_combo, self.subs_lang_combo):
+            combo.currentIndexChanged.connect(self._on_option_changed)
+
+    # ---------- API pública ----------
     def set_default_dirs(self, dirs: dict):
         self._default_dirs = dict(dirs)
-        if not self.out_edit.text().strip():
-            d = self._default_dirs.get(self.preset_combo.currentText())
-            if d:
-                self.out_edit.setText(d)
+        if not self._folder_custom:
+            self._set_folder(self._default_dirs.get(self.current_preset(), ""), custom=False)
+
+    def current_preset(self) -> str:
+        return self.preset_combo.currentData() or PRESET_MAX
 
     def encoder_mode(self) -> str:
         return self.encoder_combo.currentData() or "auto"
@@ -298,6 +474,9 @@ class AdvancedView(QWidget):
             subs_langs=tuple(self.subs_lang_combo.currentData() or ("es",)),
         )
 
+    def set_cookies_browser(self, browser: str | None):
+        _select(self.cookies_combo, browser)
+
     def save_options(self, settings):
         settings.setValue("encoder_mode", self.encoder_mode())
         settings.setValue("cookies_browser", self.cookies_combo.currentData() or "")
@@ -305,144 +484,163 @@ class AdvancedView(QWidget):
         settings.setValue("subs_langs", ",".join(self.subs_lang_combo.currentData() or ("es",)))
 
     def load_options(self, settings):
-        def select(combo, value):
-            i = combo.findData(value)
-            if i >= 0:
-                combo.setCurrentIndex(i)
-
-        select(self.encoder_combo, str(settings.value("encoder_mode", "auto")))
-        select(self.cookies_combo, str(settings.value("cookies_browser", "")) or None)
-        select(self.subs_mode_combo, str(settings.value("subs_mode", SUBS_NONE)))
+        _select(self.encoder_combo, str(settings.value("encoder_mode", "auto")))
+        _select(self.cookies_combo, str(settings.value("cookies_browser", "")) or None)
+        _select(self.subs_mode_combo, str(settings.value("subs_mode", SUBS_NONE)))
         langs = tuple(x for x in str(settings.value("subs_langs", "es")).split(",") if x)
-        select(self.subs_lang_combo, langs)
+        _select(self.subs_lang_combo, langs)
+        self._refresh_chips()
+
+    def set_url(self, url: str):
+        self.url_edit.setText(url)
+        self.url_edit.setFocus()
 
     def set_busy(self, busy: bool):
         """Con un trabajo en curso se puede seguir agregando a la cola."""
         self._is_busy = busy
-        self.cancel_btn.setEnabled(busy)
-        self.start_btn.setText("Agregar a la cola" if busy else "Descargar")
-        if busy:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(0)
-            self.progress.setFormat("Iniciando…")
+        self.start_btn.setText("Añadir a la cola" if busy else "Descargar")
 
-    def set_queue(self, jobs, current):
-        """Muestra el trabajo actual y los pendientes."""
+    def set_queue(self, jobs):
+        """Reconstruye la lista (cuando entra o sale un trabajo)."""
         self.queue_list.clear()
-        if current is not None:
-            item = QListWidgetItem(f"▶ {self._job_label(current)}")
-            item.setData(Qt.ItemDataRole.UserRole, None)
-            self.queue_list.addItem(item)
+        self._rows = {}
         for job in jobs:
-            item = QListWidgetItem(f"⏳ {self._job_label(job)}")
-            item.setData(Qt.ItemDataRole.UserRole, job.id)
+            row = QueueRow(job)
+            row.action.connect(self.request_job_action)
+            item = QListWidgetItem()
+            item.setSizeHint(row.sizeHint())
             self.queue_list.addItem(item)
-        self.tabs.setTabText(1, f"Cola ({len(jobs)})" if jobs else "Cola")
-        self.clear_queue_btn.setEnabled(bool(jobs))
-        self._update_queue_buttons()
+            self.queue_list.setItemWidget(item, row)
+            self._rows[job.id] = row
+        pending = sum(1 for j in jobs if j.status == "en cola")
+        running = any(j.status == "descargando" for j in jobs)
+        finished = any(j.status in ("listo", "error", "cancelado") for j in jobs)
+        self.tabs.setTabText(0, f"Cola · {pending + running}" if pending or running else "Cola")
+        self.queue_list.setVisible(bool(jobs))
+        self.empty_label.setVisible(not jobs)
+        self.cancel_all_btn.setVisible(running or pending > 0)
+        self.clear_done_btn.setVisible(finished)
+        parts = []
+        if running:
+            parts.append("1 activa")
+        if pending:
+            parts.append(f"{pending} en espera")
+        self.queue_label.setText(" · ".join(parts))
 
-    @staticmethod
-    def _job_label(job) -> str:
-        name = job.title or job.url
-        return f"{name}  ·  {job.preset}"
+    def update_job(self, job):
+        row = self._rows.get(job.id)
+        if row is not None:
+            row.update_from(job)
 
-    def set_progress(self, pct: int, detail: str):
-        self.progress.setRange(0, 100)
-        self.progress.setValue(pct)
-        self.progress.setFormat(detail or f"{pct}%")
+    def set_tools_status(self, text: str):
+        self.tools_label.setText(text)
 
     def append_log(self, text: str):
         self.log_box.append(text)
 
-    def show_success(self, file_path: str):
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100)
-        self.progress.setFormat("Listo")
+    # ---------- Interno ----------
+    def _on_option_changed(self, *_):
+        self._refresh_chips()
+        self.options_changed.emit()
 
-    def show_error(self, msg: str):
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFormat("Error")
-        self.append_log("⚠ " + friendly(msg))
+    def _refresh_chips(self, *_):
+        s, e = self.start_edit.text().strip(), self.end_edit.text().strip()
+        if s and e:
+            self.trim_chip.set_value(f"✂ {s} – {e}")
+        elif s:
+            self.trim_chip.set_value(f"✂ desde {s}")
+        elif e:
+            self.trim_chip.set_value(f"✂ hasta {e}")
+        else:
+            self.trim_chip.set_value(None)
 
-    def show_cancelled(self):
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFormat("Cancelado")
+        mode = self.subs_mode_combo.currentData()
+        self.subs_lang_combo.setEnabled(mode != SUBS_NONE)
+        if mode == SUBS_NONE:
+            self.subs_chip.set_value(None)
+        else:
+            how = ".srt" if mode == SUBS_SRT else "incrustados"
+            self.subs_chip.set_value(f"CC {self.subs_lang_combo.currentText()} · {how}")
 
-    # ---------- Internal ----------
-    def _update_subs_enabled(self, *_):
-        self.subs_lang_combo.setEnabled(self.subs_mode_combo.currentData() != SUBS_NONE)
+        b = self.cookies_combo.currentData()
+        self.cookies_chip.set_value(f"Sesión: {browser_display_name(b)}" if b else None)
+        self.encoder_chip.set_value("Aceleración: solo CPU" if self.encoder_mode() == "cpu" else None)
 
-    def _update_queue_buttons(self):
-        items = self.queue_list.selectedItems()
-        self.remove_queued_btn.setEnabled(
-            bool(items) and items[0].data(Qt.ItemDataRole.UserRole) is not None
-        )
+    def _clear_trim(self):
+        self.start_edit.clear()
+        self.end_edit.clear()
 
-    def _on_remove_queued(self):
-        items = self.queue_list.selectedItems()
-        if items:
-            job_id = items[0].data(Qt.ItemDataRole.UserRole)
-            if job_id is not None:
-                self.request_remove_queued.emit(int(job_id))
+    def _on_preset_changed(self, *_):
+        preset = self.current_preset()
+        self.size_field.setVisible(preset == PRESET_TAMANO)
+        if not self._folder_custom:
+            self._set_folder(self._default_dirs.get(preset, ""), custom=False)
+        self._reset_folder_act.setEnabled(self._folder_custom)
 
-    def _update_size_visibility(self, modo: str):
-        visible = modo == PRESET_TAMANO
-        self.size_label.setVisible(visible)
-        self.size_combo.setVisible(visible)
+    def _set_folder(self, path: str, custom: bool):
+        self._folder = path
+        self._folder_custom = custom
+        name = os.path.basename(os.path.normpath(path)) if path else "Elegir carpeta"
+        self.folder_btn.setText(f"Carpeta:  {name}")
+        self.folder_btn.setToolTip(path)
+        self._reset_folder_act.setEnabled(custom)
 
-    def _on_preset_changed(self, modo: str):
-        self._update_size_visibility(modo)
-        d = self._default_dirs.get(modo)
-        if not d:
-            return
-        # Cambia a la carpeta del modo si la actual está vacía o es la de otro modo
-        # (no pisa una carpeta elegida a mano).
-        actual = self.out_edit.text().strip()
-        if not actual or actual in self._default_dirs.values():
-            self.out_edit.setText(d)
-
-    def _elegir_carpeta(self):
+    def _choose_folder(self):
         carpeta = QFileDialog.getExistingDirectory(
-            self, "Elegir carpeta de salida", self.out_edit.text() or os.path.expanduser("~")
+            self, "Elegir carpeta de salida", self._folder or os.path.expanduser("~")
         )
         if carpeta:
-            self.out_edit.setText(carpeta)
+            self._set_folder(os.path.normpath(carpeta), custom=True)
+
+    def _reset_folder(self):
+        self._set_folder(self._default_dirs.get(self.current_preset(), ""), custom=False)
+
+    def _open_folder(self):
+        if self._folder and os.path.isdir(self._folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._folder))
+
+    def _do_paste(self):
+        clip = QGuiApplication.clipboard()
+        text = (clip.text() if clip else "") or ""
+        url = find_url_in_text(text) or text.strip()
+        if url:
+            self.url_edit.setText(url)
+        self.url_edit.setFocus()
 
     def _on_start(self):
         url = self.url_edit.text().strip()
-        carpeta = self.out_edit.text().strip()
-        preset = self.preset_combo.currentText()
-        start_t = self.start_edit.text().strip()
-        end_t = self.end_edit.text().strip()
+        preset = self.current_preset()
         if not url:
-            self.append_log("⚠️ Pega o escribe una URL.")
+            self.url_edit.setPlaceholderText("Primero pega un enlace aquí")
+            self.url_edit.setFocus()
             return
         if not is_http_url(url):
             self.append_log("⚠️ Esa URL no se ve válida: debe empezar con http:// o https://")
+            self.tabs.setCurrentIndex(1)
             return
-        if not carpeta:
-            self.append_log("⚠️ Elige una carpeta de salida.")
-            return
+        if not self._folder:
+            self._choose_folder()
+            if not self._folder:
+                return
         if preset == PRESET_TAMANO and self.target_size_mb() is None:
+            self.size_combo.setFocus()
             self.append_log("⚠️ Escribe un peso máximo válido en MB (por ejemplo 25).")
             return
-        self.request_start.emit(url, preset, carpeta, start_t, end_t)
+        self.request_start.emit(
+            url, preset, self._folder, self.start_edit.text().strip(), self.end_edit.text().strip()
+        )
+        self.tabs.setCurrentIndex(0)
 
-    # ---------- Drag & drop ----------
+    # ---------- Arrastrar y soltar ----------
     def dragEnterEvent(self, e):
         if e.mimeData().hasText() or e.mimeData().hasUrls():
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        text = ""
-        if e.mimeData().hasText():
-            text = e.mimeData().text()
-        elif e.mimeData().hasUrls():
-            urls = e.mimeData().urls()
-            if urls:
-                text = urls[0].toString()
+        md = e.mimeData()
+        text = md.text() if md.hasText() else ""
+        if not text and md.hasUrls() and md.urls():
+            text = md.urls()[0].toString()
         url = find_url_in_text(text) or text
         if url:
             self.url_edit.setText(url.strip())

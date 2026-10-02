@@ -1,10 +1,12 @@
-"""Workers en hilos Qt: trabajo de descarga, metadatos y tareas sueltas."""
+"""Núcleo de un trabajo de descarga, sin dependencias de Qt.
+
+JobRunner corre en cualquier hilo y avisa por callbacks; la interfaz (Qt hoy)
+se conecta con un adaptador fino (vibeloader/ui/qt_bridge.py).
+"""
 import itertools
 import os
 import threading
 from dataclasses import dataclass, field
-
-from PySide6.QtCore import QObject, Signal, Slot
 
 from .config import (
     DEFAULT_TARGET_SIZE_MB,
@@ -37,7 +39,6 @@ from .ytdlp_core import (
     clip_seconds,
     download,
     download_subtitles,
-    fetch_metadata,
 )
 
 # Presets que bajan una fuente y la procesan con ffmpeg:
@@ -84,33 +85,70 @@ class Job:
     end: str = ""
     options: JobOptions = field(default_factory=JobOptions)
     id: int = field(default_factory=lambda: next(_job_ids))
-    status: str = "en cola"  # en cola | descargando | listo | error | cancelado
+    status: str = "en cola"  # en cola | descargando | listo | error | cancelado | lista
     title: str = ""
     result_path: str = ""
+    error: str = ""
+    progress: "ProgressInfo | None" = None
     from_simple: bool = False  # la carpeta sale de las predeterminadas de cada modo
 
 
-class Worker(QObject):
-    finished = Signal()
-    error = Signal(str)
-    log = Signal(str)
-    progress = Signal(int, str)
-    completed = Signal(str, str)  # ruta, título
-    playlist_detected = Signal(str)
+# Fases del trabajo, para mostrar el progreso sin jerga.
+PHASE_PREPARING = "preparando"
+PHASE_DOWNLOADING = "descargando"
+PHASE_CONVERTING = "convirtiendo"
+PHASE_DONE = "listo"
 
-    def __init__(self, url, carpeta_salida, preset, start_time, end_time, options: JobOptions | None = None):
-        super().__init__()
+
+@dataclass(frozen=True)
+class ProgressInfo:
+    pct: int
+    text: str  # detalle técnico (modo avanzado y registro)
+    phase: str = PHASE_PREPARING
+    speed: float | None = None  # bytes/s (solo al descargar)
+    eta: float | None = None  # segundos (solo al descargar)
+
+
+def _noop(*_a, **_k):
+    pass
+
+
+class JobRunner:
+    """Ejecuta un trabajo y avisa por callbacks (llamados desde el hilo que corre run())."""
+
+    def __init__(
+        self,
+        url,
+        carpeta_salida,
+        preset,
+        start_time,
+        end_time,
+        options: JobOptions | None = None,
+        *,
+        on_log=_noop,
+        on_progress=_noop,
+        on_completed=_noop,
+        on_error=_noop,
+        on_playlist=_noop,
+        on_finished=_noop,
+    ):
         self.url = url
         self.carpeta_salida = carpeta_salida
         self.preset = preset
         self.start_time = start_time
         self.end_time = end_time
         self.options = options or JobOptions()
+        self.on_log = on_log
+        self.on_progress = on_progress  # (ProgressInfo)
+        self.on_completed = on_completed  # (ruta, título)
+        self.on_error = on_error  # (mensaje)
+        self.on_playlist = on_playlist  # (url)
+        self.on_finished = on_finished  # ()
+        self._phase = PHASE_PREPARING
         self._cancel_event = threading.Event()
         self._proc_holder = {}
         self._partial_outputs = []
 
-    @Slot()
     def request_cancel(self):
         self._cancel_event.set()
         proc = self._proc_holder.get("p")
@@ -121,16 +159,21 @@ class Worker(QObject):
                 pass
 
     def _logger(self, msg):
-        self.log.emit(msg)
+        self.on_log(msg)
 
-    def _emit_progress(self, p, msg):
-        self.progress.emit(max(0, min(100, int(p))), msg)
+    def _emit_progress(self, p, msg, speed=None, eta=None, phase=None):
+        pct = max(0, min(100, int(p)))
+        self.on_progress(ProgressInfo(pct, msg, phase or self._phase, speed, eta))
+
+    def _set_phase(self, phase):
+        self._phase = phase
 
     def _check_cancel(self):
         if self._cancel_event.is_set():
             raise UserCancelledError("Cancelado por el usuario")
 
     def _download(self, spec, cut_with_ytdlp, pct_hi):
+        self._set_phase(PHASE_DOWNLOADING)
         return download(
             self.url,
             self.carpeta_salida,
@@ -187,6 +230,7 @@ class Worker(QObject):
         if not os.path.exists(output_file):
             self._partial_outputs.append(output_file)
         embed = bool(subs) and self.options.subs_mode == SUBS_EMBED
+        self._set_phase(PHASE_CONVERTING)
         convert(
             res.path,
             output_file,
@@ -216,6 +260,7 @@ class Worker(QObject):
         subs = self._fetch_subtitles(93)
         if subs:
             if self.options.subs_mode == SUBS_EMBED and can_embed_subtitles(res.path):
+                self._set_phase(PHASE_CONVERTING)
                 self._emit_progress(96, "Incrustando subtítulos…")
                 embed_subtitles(
                     res.path,
@@ -230,7 +275,6 @@ class Worker(QObject):
         self._logger(done_msg)
         return res.path, res.info.get("title") or ""
 
-    @Slot()
     def run(self):
         snapshot = None
         try:
@@ -249,81 +293,24 @@ class Worker(QObject):
                 raise ValueError(f"Preset no reconocido: {self.preset}")
 
             remove_files(snapshot.leftovers_after_success(result_path), self._logger)
+            self._set_phase(PHASE_DONE)
             self._emit_progress(100, "Listo")
-            self.completed.emit(result_path, title)
+            self.on_completed(result_path, title)
 
         except UserCancelledError as e:
             self._logger("⏹️ " + str(e))
-            self.progress.emit(0, "Cancelado")
             self._cleanup_failure(snapshot)
         except PlaylistNotSupportedError as e:
             self._logger("📃 " + str(e))
-            self.playlist_detected.emit(self.url)
+            self.on_playlist(self.url)
         except Exception as e:
             log_exception(f"Error en el trabajo ({self.preset}) {self.url}")
             self._cleanup_failure(snapshot)
-            self.error.emit(str(e))
+            self.on_error(str(e))
         finally:
-            self.finished.emit()
+            self.on_finished()
 
     def _cleanup_failure(self, snapshot):
         if snapshot is None:
             return
         remove_files(snapshot.leftovers_after_failure(self._partial_outputs), self._logger)
-
-
-class MetadataFetcher(QObject):
-    """Vive en su propio QThread; extrae info sin descargar."""
-
-    fetched = Signal(dict, int)
-    failed = Signal(str, int)
-    log = Signal(str)
-
-    def __init__(self):
-        super().__init__()
-        # Lo escribe el hilo de la GUI antes de pedir; si llegaron varios pedidos
-        # seguidos (el usuario pegó varios enlaces), solo se procesa el último.
-        self.latest_token = 0
-        self.cookies_browser = None
-
-    @Slot(str, int)
-    def fetch(self, url: str, token: int):
-        if not url or token != self.latest_token:
-            return
-        try:
-            data = fetch_metadata(url, logger=self.log.emit, cookies_browser=self.cookies_browser)
-        except Exception as e:
-            self.failed.emit(str(e), token)
-            return
-        self.fetched.emit(data, token)
-
-
-class BackgroundTask(QObject):
-    """Corre fn(task) en un hilo de Python y avisa a la GUI con señales.
-
-    Para tareas sueltas (actualizar yt-dlp, descargar ffmpeg). Las señales se
-    emiten desde el hilo y Qt las entrega encoladas en el hilo de la GUI.
-    """
-
-    log = Signal(str)
-    progress = Signal(object, object)
-    done = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, fn, name="tarea"):
-        super().__init__()
-        self._fn = fn
-        self._name = name
-        self.cancel_event = threading.Event()
-
-    def start(self):
-        threading.Thread(target=self._run, name=self._name, daemon=True).start()
-
-    def _run(self):
-        try:
-            result = self._fn(self)
-        except Exception as e:
-            log_exception(f"Error en {self._name}")
-            self.failed.emit(str(e))
-            return
-        self.done.emit(result)

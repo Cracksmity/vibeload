@@ -2,9 +2,6 @@
 import urllib.request
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
-
 from .config import BROWSER_UA
 
 
@@ -34,22 +31,6 @@ def fetch_thumbnail_bytes(url: str, timeout: float = 12.0) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
-
-
-def image_from_bytes(data: bytes, max_w: int = 160, max_h: int = 90) -> QImage | None:
-    """Decodifica y escala con QImage: se puede usar fuera del hilo de la GUI
-    (QPixmap no; usarlo en un hilo secundario puede cerrar la app)."""
-    if not data:
-        return None
-    img = QImage()
-    if not img.loadFromData(data) or img.isNull():
-        return None
-    return img.scaled(
-        max_w,
-        max_h,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
 
 
 def collect_thumbnail_urls(info: dict) -> list:

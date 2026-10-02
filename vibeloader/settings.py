@@ -1,4 +1,4 @@
-"""Persistencia en QSettings: carpetas por modo y enlaces recientes."""
+"""Persistencia en QSettings: carpetas por formato."""
 import os
 
 from PySide6.QtCore import QSettings
@@ -52,23 +52,3 @@ def save_default_dirs_to_settings(settings: QSettings, dirs: dict):
     for preset, key in SETTINGS_KEYS.items():
         if dirs.get(preset):
             settings.setValue(key, dirs[preset])
-
-
-def load_recent_urls(settings: QSettings, limit: int = 5):
-    raw = settings.value("recent_urls", [])
-    if isinstance(raw, str):
-        raw = [raw] if raw else []
-    if not isinstance(raw, list):
-        raw = []
-    out = []
-    for u in raw:
-        s = str(u).strip()
-        if s and s not in out:
-            out.append(s)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def save_recent_urls(settings: QSettings, urls):
-    settings.setValue("recent_urls", list(urls))

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..config import preset_label
 from ..history import clear_history, load_history
 
 
@@ -24,14 +25,15 @@ class HistoryDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Historial de descargas")
-        self.resize(820, 460)
+        self.resize(760, 440)
+        self.chosen_url = ""
 
         layout = QVBoxLayout(self)
         self.empty_label = QLabel("Todavía no hay descargas en el historial.")
         layout.addWidget(self.empty_label)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Fecha", "Archivo", "Modo"])
+        self.table.setHorizontalHeaderLabels(["Fecha", "Archivo", "Formato"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -47,9 +49,13 @@ class HistoryDialog(QDialog):
         row = QHBoxLayout()
         self.open_file_btn = QPushButton("Abrir archivo")
         self.open_file_btn.clicked.connect(self._open_file)
-        self.open_folder_btn = QPushButton("Abrir carpeta")
+        self.open_folder_btn = QPushButton("Ver en carpeta")
         self.open_folder_btn.setObjectName("secondary")
         self.open_folder_btn.clicked.connect(self._open_folder)
+        self.again_btn = QPushButton("Volver a descargar")
+        self.again_btn.setObjectName("secondary")
+        self.again_btn.setToolTip("Pone el enlace de nuevo en la ventana principal")
+        self.again_btn.clicked.connect(self._use_again)
         self.clear_btn = QPushButton("Borrar historial")
         self.clear_btn.setObjectName("secondary")
         self.clear_btn.setToolTip("Solo borra la lista; los archivos no se tocan")
@@ -59,6 +65,7 @@ class HistoryDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         row.addWidget(self.open_file_btn)
         row.addWidget(self.open_folder_btn)
+        row.addWidget(self.again_btn)
         row.addStretch()
         row.addWidget(self.clear_btn)
         row.addWidget(close_btn)
@@ -77,7 +84,7 @@ class HistoryDialog(QDialog):
             items = [
                 QTableWidgetItem(when),
                 QTableWidgetItem(name if exists else f"{name}  (ya no existe)"),
-                QTableWidgetItem(e.get("preset", "")),
+                QTableWidgetItem(preset_label(e.get("preset", ""))),
             ]
             items[1].setToolTip(e["path"])
             for c, it in enumerate(items):
@@ -102,6 +109,13 @@ class HistoryDialog(QDialog):
         e = self._current()
         self.open_file_btn.setEnabled(bool(e and os.path.exists(e["path"])))
         self.open_folder_btn.setEnabled(bool(e and os.path.isdir(os.path.dirname(e["path"]))))
+        self.again_btn.setEnabled(bool(e and e.get("url")))
+
+    def _use_again(self):
+        e = self._current()
+        if e and e.get("url"):
+            self.chosen_url = e["url"]
+            self.accept()
 
     def _open_file(self):
         e = self._current()

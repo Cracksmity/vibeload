@@ -1,4 +1,4 @@
-"""Ventana principal: une vistas, worker, metadatos y bandeja."""
+"""Ventana principal: une vistas, cola de trabajos, metadatos, tareas de fondo y bandeja."""
 import logging
 import os
 import sys
@@ -16,9 +16,12 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from ..config import APP_VERSION, DEFAULT_TARGET_SIZE_MB, SETTINGS_APP, SETTINGS_ORG, is_frozen, resource_path
 from .. import updater
-from ..jobs import BackgroundTask, MetadataFetcher, Worker
+from ..config import ADVANCED_PRESETS, APP_VERSION, SETTINGS_APP, SETTINGS_ORG, is_frozen, resource_path
+from ..errors import friendly
+from ..ffmpeg_core import ffmpeg_version
+from ..history import add_history
+from ..jobs import BackgroundTask, Job, MetadataFetcher, Worker
 from ..logs import append_log_file, ensure_log_path
 from ..settings import (
     load_default_dirs_from_settings,
@@ -27,11 +30,13 @@ from ..settings import (
     save_recent_urls,
     suggested_default_dirs,
 )
-from ..ffmpeg_core import ffmpeg_version
 from ..tools import ffmpeg_available, ffmpeg_path, ffprobe_path, local_ffmpeg_dir
-from ..ytdlp_core import ytdlp_version
+from ..utils import windows_safe_video_name
+from ..ytdlp_core import fetch_metadata, ytdlp_version
 from .advanced_view import AdvancedView
 from .dialogs import DefaultFoldersConfigDialog
+from .history_dialog import HistoryDialog
+from .playlist_dialog import PlaylistDialog
 from .simple_view import SimpleView
 from .styles import THEMES, build_stylesheet
 
@@ -44,7 +49,7 @@ class MainWindow(QMainWindow):
         ensure_log_path()
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.setWindowTitle(f"VibeLoader {APP_VERSION} ✨")
-        self.setMinimumSize(820, 620)
+        self.setMinimumSize(860, 680)
         self.setWindowIcon(QIcon(resource_path("assets/icono.ico")))
 
         loaded = load_default_dirs_from_settings(self.settings)
@@ -55,15 +60,20 @@ class MainWindow(QMainWindow):
             self.theme = "dark"
         self.recent_urls = load_recent_urls(self.settings)
 
-        # Worker / metadata
+        # Cola de trabajos
         self.worker = None
         self.thread = None
-        self._job_running = False
-        self._job_cancelled = False
-        self._job_failed = False
-        self._active_view_for_job = None
-        self._last_completed_path = None
+        self._job_running = False  # hay un Worker activo
+        self._queue: list[Job] = []
+        self._current_job: Job | None = None
+        self._cancel_requested = False
+        self._batch = None  # resumen de la tanda en curso (varios trabajos seguidos)
+        self._pending_playlists: list[Job] = []
         self._bg_tasks = set()  # mantiene vivas las BackgroundTask en curso
+        # Hilo + worker del trabajo anterior hasta que su hilo termine de cerrarse:
+        # si Python suelta la última referencia antes, PySide destruye un QThread
+        # en marcha y Qt aborta la app.
+        self._retiring = set()
 
         self._meta_thread = QThread(self)
         self._meta = MetadataFetcher()
@@ -71,7 +81,7 @@ class MainWindow(QMainWindow):
         self.request_metadata.connect(self._meta.fetch)
         self._meta_thread.start()
 
-        # Tray for notifications
+        # Bandeja para notificaciones
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(self)
@@ -82,14 +92,13 @@ class MainWindow(QMainWindow):
                 self.tray.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon))
             self.tray.setToolTip("VibeLoader")
 
-        # Views
+        # Vistas
         self.simple_view = SimpleView(self)
         self.advanced_view = AdvancedView(self)
         self.advanced_view.set_default_dirs(self.default_dirs)
-        self.advanced_view.set_encoder_mode(str(self.settings.value("encoder_mode", "auto")))
-        self.advanced_view.encoder_combo.currentIndexChanged.connect(
-            lambda _i: self.settings.setValue("encoder_mode", self.advanced_view.encoder_mode())
-        )
+        self.advanced_view.load_options(self.settings)
+        self.advanced_view.options_changed.connect(self._on_options_changed)
+        self._on_options_changed()
         self.simple_view.update_folder_hint(self.default_dirs)
         self.simple_view.set_recents(self.recent_urls)
 
@@ -98,36 +107,36 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.advanced_view)
         self.setCentralWidget(self.stack)
 
-        # Wire signals
-        self.simple_view.request_open_advanced.connect(self._show_advanced)
-        self.simple_view.request_open_folders.connect(self._open_folders_dialog)
-        self.simple_view.request_toggle_theme.connect(self._toggle_theme)
-        self.simple_view.request_start.connect(self._start_from_simple)
-        self.simple_view.request_cancel.connect(self._cancel_job)
-        self.simple_view.request_fetch_metadata.connect(self._forward_metadata_request)
+        # Señales
+        sv, av = self.simple_view, self.advanced_view
+        sv.request_open_advanced.connect(self._show_advanced)
+        sv.request_open_folders.connect(self._open_folders_dialog)
+        sv.request_open_history.connect(self._open_history)
+        sv.request_toggle_theme.connect(self._toggle_theme)
+        sv.request_start.connect(self._start_from_simple)
+        sv.request_cancel.connect(self._cancel_job)
+        sv.request_fetch_metadata.connect(self._forward_metadata_request)
 
-        self.advanced_view.request_open_simple.connect(self._show_simple)
-        self.advanced_view.request_open_folders.connect(self._open_folders_dialog)
-        self.advanced_view.request_toggle_theme.connect(self._toggle_theme)
-        self.advanced_view.request_start.connect(self._start_from_advanced)
-        self.advanced_view.request_cancel.connect(self._cancel_job)
-        self.advanced_view.request_update_ytdlp.connect(lambda: self._update_ytdlp(manual=True))
-        self.advanced_view.request_install_ffmpeg.connect(self._offer_ffmpeg_download)
-        self.advanced_view.auto_update_chk.setChecked(
-            self.settings.value("auto_update_ytdlp", True, type=bool)
-        )
-        self.advanced_view.auto_update_toggled.connect(
-            lambda on: self.settings.setValue("auto_update_ytdlp", bool(on))
-        )
+        av.request_open_simple.connect(self._show_simple)
+        av.request_open_folders.connect(self._open_folders_dialog)
+        av.request_open_history.connect(self._open_history)
+        av.request_toggle_theme.connect(self._toggle_theme)
+        av.request_start.connect(self._start_from_advanced)
+        av.request_cancel.connect(self._cancel_job)
+        av.request_remove_queued.connect(self._remove_queued)
+        av.request_clear_queue.connect(self._clear_queue)
+        av.request_update_ytdlp.connect(lambda: self._update_ytdlp(manual=True))
+        av.request_install_ffmpeg.connect(self._offer_ffmpeg_download)
+        av.auto_update_chk.setChecked(self.settings.value("auto_update_ytdlp", True, type=bool))
+        av.auto_update_toggled.connect(lambda on: self.settings.setValue("auto_update_ytdlp", bool(on)))
 
         self._meta.fetched.connect(self.simple_view.on_metadata)
         self._meta.failed.connect(self.simple_view.on_metadata_failed)
         self._meta.log.connect(append_log_file)
 
-        # Theme & arranque
         self._apply_theme()
 
-        # Start log
+        # Log de arranque
         self._log_to_advanced(
             f"🚀 VibeLoader {APP_VERSION} · yt-dlp {ytdlp_version()} · "
             f"{'exe' if is_frozen() else 'Python ' + sys.version.split()[0]}"
@@ -148,7 +157,7 @@ class MainWindow(QMainWindow):
         ):
             QTimer.singleShot(3000, lambda: self._update_ytdlp(manual=False))
 
-        # Decide vista inicial
+        # Vista inicial
         last_view = str(self.settings.value("last_view", "simple"))
         if self._pending_first_run or last_view != "advanced":
             self._show_simple()
@@ -158,9 +167,7 @@ class MainWindow(QMainWindow):
         if self._pending_first_run:
             QTimer.singleShot(0, self._first_run_setup)
         else:
-            QApplication.instance().applicationStateChanged.connect(
-                self._on_app_state_changed
-            )
+            QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
         QTimer.singleShot(300, self.simple_view.maybe_autopaste_clipboard)
 
@@ -182,10 +189,16 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.advanced_view)
         self.settings.setValue("last_view", "advanced")
 
-    # ---------- App focus ----------
     def _on_app_state_changed(self, state):
         if state == Qt.ApplicationState.ApplicationActive:
             QTimer.singleShot(150, self.simple_view.maybe_autopaste_clipboard)
+
+    def _open_history(self):
+        HistoryDialog(self, self.settings).exec()
+
+    def _on_options_changed(self):
+        self.advanced_view.save_options(self.settings)
+        self._meta.cookies_browser = self.advanced_view.job_options().cookies_browser
 
     # ---------- Carpetas ----------
     def _first_run_setup(self):
@@ -194,9 +207,7 @@ class MainWindow(QMainWindow):
             self.default_dirs = dlg.get_paths()
         save_default_dirs_to_settings(self.settings, self.default_dirs)
         self._refresh_dirs_in_views()
-        QApplication.instance().applicationStateChanged.connect(
-            self._on_app_state_changed
-        )
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
     def _open_folders_dialog(self):
         dlg = DefaultFoldersConfigDialog(self, dict(self.default_dirs), first_run=False)
@@ -209,6 +220,258 @@ class MainWindow(QMainWindow):
     def _refresh_dirs_in_views(self):
         self.simple_view.update_folder_hint(self.default_dirs)
         self.advanced_view.set_default_dirs(self.default_dirs)
+
+    def _folder_for_preset(self, preset: str) -> str:
+        folder = self.default_dirs.get(preset, "")
+        return folder or suggested_default_dirs().get(preset, os.path.expanduser("~"))
+
+    # ---------- Metadatos ----------
+    def _forward_metadata_request(self, url: str, token: int):
+        self._meta.latest_token = token
+        self.request_metadata.emit(url, token)
+
+    # ---------- Cola ----------
+    def _start_from_simple(self, url: str, preset: str):
+        job = Job(
+            url=url,
+            preset=preset,
+            folder=self._folder_for_preset(preset),
+            options=self.advanced_view.job_options(),
+            from_simple=True,
+        )
+        self._enqueue(job, source_view=self.simple_view)
+
+    def _start_from_advanced(self, url: str, preset: str, folder: str, start_t: str, end_t: str):
+        job = Job(url=url, preset=preset, folder=folder, start=start_t, end=end_t, options=self.advanced_view.job_options())
+        self._enqueue(job, source_view=self.advanced_view)
+
+    def _enqueue(self, job: Job, source_view=None):
+        if not ffmpeg_available():
+            (source_view or self.simple_view).show_error(
+                "No se encontró ffmpeg, que hace falta para todos los modos. "
+                "Usa el botón «Descargar ffmpeg» o instálalo y agrégalo al PATH."
+            )
+            self._on_ffmpeg_missing()
+            return
+        self._remember_url(job.url)
+        self._queue.append(job)
+        if self._job_running:
+            self._log_to_advanced(f"➕ Agregado a la cola ({len(self._queue)} pendientes): {job.url}")
+        self._refresh_queue_ui()
+        if not self._job_running:
+            self._start_next()
+
+    def _refresh_queue_ui(self):
+        self.advanced_view.set_queue(self._queue, self._current_job if self._job_running else None)
+        self.simple_view.set_queue_count(len(self._queue))
+
+    def _remove_queued(self, job_id: int):
+        self._queue = [j for j in self._queue if j.id != job_id]
+        self._refresh_queue_ui()
+
+    def _clear_queue(self):
+        if self._queue:
+            self._log_to_advanced(f"🗑️ Cola vaciada ({len(self._queue)} trabajos).")
+        self._queue.clear()
+        self._refresh_queue_ui()
+
+    def _start_next(self):
+        if not self._queue:
+            self._finish_batch()
+            return
+        job = self._queue.pop(0)
+        self._retire_current_thread()
+        if self._batch is None:
+            self._batch = {"total": 0, "ok": 0, "errors": [], "last_path": "", "cancelled": False}
+            self._cancel_requested = False
+            self.simple_view.set_busy(True)
+            self.advanced_view.set_busy(True)
+        self._batch["total"] += 1
+        self._current_job = job
+        job.status = "descargando"
+        self._job_running = True
+        self._refresh_queue_ui()
+
+        self.thread = QThread()
+        self.worker = Worker(job.url, job.folder, job.preset, job.start, job.end, options=job.options)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.log.connect(self._on_worker_log)
+        self.worker.progress.connect(self._on_worker_progress)
+        self.worker.completed.connect(self._on_worker_completed)
+        self.worker.error.connect(self._on_worker_error)
+        self.worker.playlist_detected.connect(self._on_playlist_detected)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    def _retire_current_thread(self):
+        thread, worker = self.thread, self.worker
+        if thread is None:
+            return
+        pair = (thread, worker)
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False  # ya se borró: terminó
+        if running:
+            self._retiring.add(pair)
+            thread.finished.connect(lambda: self._retiring.discard(pair))
+        self.thread = self.worker = None
+
+    def _cancel_job(self):
+        """Cancela la descarga actual y vacía la cola."""
+        if self.worker is not None and self._job_running:
+            self._cancel_requested = True
+            if self._queue:
+                self._log_to_advanced(f"🗑️ Se quitan {len(self._queue)} trabajos de la cola.")
+                self._queue.clear()
+            self.worker.request_cancel()
+            self._log_to_advanced("⏹️ Cancelación solicitada…")
+            self._refresh_queue_ui()
+
+    def _on_worker_log(self, msg: str):
+        self.advanced_view.append_log(msg)
+        append_log_file(msg)
+
+    def _on_worker_progress(self, pct: int, msg: str):
+        if self._batch and self._batch["total"] + len(self._queue) > 1:
+            msg = f"[{self._batch['total']}/{self._batch['total'] + len(self._queue)}] {msg}"
+        self.advanced_view.set_progress(pct, msg)
+        self.simple_view.set_progress(pct, msg)
+
+    def _on_worker_completed(self, file_path: str, title: str):
+        job = self._current_job
+        job.status, job.result_path, job.title = "listo", file_path, title
+        self._batch["ok"] += 1
+        self._batch["last_path"] = file_path
+        add_history(self.settings, title=title, path=file_path, preset=job.preset, url=job.url)
+
+    def _on_worker_error(self, msg: str):
+        job = self._current_job
+        job.status = "error"
+        self._batch["errors"].append((job, msg))
+        self.advanced_view.show_error(msg)
+
+    def _on_playlist_detected(self, url: str):
+        job = self._current_job
+        job.status = "lista"
+        self._pending_playlists.append(job)
+
+    def _on_worker_finished(self):
+        self._job_running = False
+        if self._cancel_requested and self._current_job and self._current_job.status == "descargando":
+            self._current_job.status = "cancelado"
+            self._batch["cancelled"] = True
+        self._current_job = None
+        if self._queue and not self._cancel_requested:
+            self._start_next()
+        else:
+            self._finish_batch()
+        if self._pending_playlists:
+            QTimer.singleShot(0, self._open_next_playlist)
+
+    def _finish_batch(self):
+        batch, self._batch = self._batch, None
+        self.simple_view.set_busy(False)
+        self.advanced_view.set_busy(False)
+        self._refresh_queue_ui()
+        if batch is None:
+            return
+        total, ok, errors = batch["total"], batch["ok"], batch["errors"]
+        playlists_only = ok == 0 and not errors and not batch["cancelled"]
+        if batch["cancelled"] and ok:
+            self.advanced_view.show_cancelled()
+            self.simple_view.show_success(
+                batch["last_path"], f"{ok} de {total} descargas listas; el resto se canceló."
+            )
+        elif batch["cancelled"]:
+            self.advanced_view.show_cancelled()
+            self.simple_view.show_cancelled()
+        elif playlists_only:
+            self.advanced_view.set_progress(0, "Esperando…")
+        elif ok == 0:
+            msg = errors[-1][1]
+            if total > 1:
+                msg = f"Fallaron las {total} descargas. Última: {friendly(msg)}"
+            self.simple_view.show_error(msg)
+            self._notify("Hubo un problema con la descarga.", warning=True)
+        else:
+            note = ""
+            if total > 1:
+                note = f"{ok} de {total} descargas listas."
+            if errors:
+                note += f" {len(errors)} fallaron (detalles en el modo avanzado)."
+            self.advanced_view.show_success(batch["last_path"])
+            self.simple_view.show_success(batch["last_path"], note.strip())
+            self._notify("Descarga lista." if total == 1 else f"{ok} de {total} descargas listas.")
+
+    def _notify(self, text: str, warning: bool = False):
+        if self.tray and not self.isActiveWindow():
+            self.tray.show()
+            icon = QSystemTrayIcon.MessageIcon.Warning if warning else QSystemTrayIcon.MessageIcon.Information
+            self.tray.showMessage("VibeLoader", text, icon, 5000)
+
+    # ---------- Playlists ----------
+    def _open_next_playlist(self):
+        if not self._pending_playlists:
+            return
+        job = self._pending_playlists.pop(0)
+        self.simple_view.show_notice("Leyendo la lista de reproducción…")
+
+        def work(_task):
+            return fetch_metadata(job.url, cookies_browser=job.options.cookies_browser)
+
+        def on_done(data):
+            self.simple_view.hide_notice()
+            entries = data.get("entries") or []
+            if not entries:
+                self.simple_view.show_error("No se pudieron leer los videos de esta lista.")
+            else:
+                self._choose_from_playlist(job, data.get("title") or "", entries)
+            if self._pending_playlists:
+                QTimer.singleShot(0, self._open_next_playlist)
+
+        def on_failed(msg):
+            self.simple_view.hide_notice()
+            self.simple_view.show_error(msg)
+
+        self._run_task(work, "lectura de playlist", on_done, on_failed)
+
+    def _choose_from_playlist(self, job: Job, title: str, entries: list):
+        dlg = PlaylistDialog(self, title, entries, ADVANCED_PRESETS, job.preset)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        preset = dlg.preset()
+        folder = self._folder_for_preset(preset) if job.from_simple else job.folder
+        if dlg.use_subfolder() and title:
+            folder = os.path.join(folder, windows_safe_video_name(title, max_len=80))
+        urls = dlg.selected_urls()
+        self._log_to_advanced(f"📃 {len(urls)} videos de «{title}» agregados a la cola → {folder}")
+        self._queue.extend(
+            Job(url=url, preset=preset, folder=folder, options=job.options, from_simple=job.from_simple)
+            for url in urls
+        )
+        self._refresh_queue_ui()
+        if not self._job_running:
+            self._start_next()
+
+    # ---------- Recientes ----------
+    def _remember_url(self, url: str):
+        if not url:
+            return
+        urls = [u for u in self.recent_urls if u != url]
+        urls.insert(0, url)
+        self.recent_urls = urls[:5]
+        save_recent_urls(self.settings, self.recent_urls)
+        self.simple_view.set_recents(self.recent_urls)
+
+    # ---------- Logging ----------
+    def _log_to_advanced(self, msg: str):
+        self.advanced_view.append_log(msg)
+        append_log_file(msg)
 
     # ---------- Tareas de fondo ----------
     def _run_task(self, fn, name, on_done, on_failed, on_progress=None):
@@ -337,150 +600,24 @@ class MainWindow(QMainWindow):
         if QProcess.startDetached(sys.executable, args)[0]:
             self.close()
 
-    # ---------- Metadatos ----------
-    def _forward_metadata_request(self, url: str, token: int):
-        self._meta.latest_token = token
-        self.request_metadata.emit(url, token)
-
-    # ---------- Job ----------
-    def _start_from_simple(self, url: str, preset: str):
-        folder = self.default_dirs.get(preset, "")
-        if not folder:
-            folder = suggested_default_dirs().get(preset, os.path.expanduser("~"))
-        self._launch_job(url, preset, folder, "", "", source_view=self.simple_view)
-
-    def _start_from_advanced(
-        self, url: str, preset: str, folder: str, start_t: str, end_t: str
-    ):
-        self._launch_job(url, preset, folder, start_t, end_t, source_view=self.advanced_view)
-
-    def _launch_job(self, url, preset, folder, start_t, end_t, source_view):
-        if self._job_running:
-            self._log_to_advanced("⚠️ Ya hay una descarga en curso.")
-            return
-        if not ffmpeg_available():
-            source_view.show_error(
-                "No se encontró ffmpeg, que hace falta para todos los modos. "
-                "Usa el botón «Descargar ffmpeg» o instálalo y agrégalo al PATH."
-            )
-            self._on_ffmpeg_missing()
-            return
-        self._job_running = True
-        self._job_cancelled = False
-        self._job_failed = False
-        self._active_view_for_job = source_view
-        self._remember_url(url)
-
-        source_view.set_busy(True)
-        if source_view is self.simple_view:
-            self.advanced_view.set_busy(True)
-        else:
-            self.simple_view.set_busy(True)
-
-        self.thread = QThread()
-        self.worker = Worker(
-            url,
-            folder,
-            preset,
-            start_t,
-            end_t,
-            encoder_mode=self.advanced_view.encoder_mode(),
-            target_mb=self.advanced_view.target_size_mb() or DEFAULT_TARGET_SIZE_MB,
-        )
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.log.connect(self._on_worker_log)
-        self.worker.progress.connect(self._on_worker_progress)
-        self.worker.completed.connect(self._on_worker_completed)
-        self.worker.error.connect(self._on_worker_error)
-        self.worker.finished.connect(self._on_worker_finished)
-        self.worker.finished.connect(self.thread.quit)
-        self.thread.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.start()
-
-    def _cancel_job(self):
-        if self.worker is not None and self._job_running:
-            self._job_cancelled = True
-            self.worker.request_cancel()
-            self._log_to_advanced("⏹️ Cancelación solicitada…")
-
-    def _on_worker_log(self, msg: str):
-        self.advanced_view.append_log(msg)
-        append_log_file(msg)
-
-    def _on_worker_progress(self, pct: int, msg: str):
-        self.advanced_view.set_progress(pct, msg)
-        self.simple_view.set_progress(pct, msg)
-
-    def _on_worker_completed(self, file_path: str):
-        self._last_completed_path = file_path
-
-    def _on_worker_error(self, msg: str):
-        self._job_failed = True
-        self.advanced_view.show_error(msg)
-        self.simple_view.show_error(msg)
-        if self.tray and not self.isActiveWindow():
-            self.tray.show()
-            self.tray.showMessage(
-                "VibeLoader", "Hubo un problema con la descarga.", QSystemTrayIcon.MessageIcon.Warning, 5000
-            )
-
-    def _on_worker_finished(self):
-        path = getattr(self, "_last_completed_path", None)
-        self._job_running = False
-        self.advanced_view.set_busy(False)
-        self.simple_view.set_busy(False)
-        if self._job_cancelled:
-            self.advanced_view.show_cancelled()
-            self.simple_view.show_cancelled()
-        elif self._job_failed:
-            pass
-        else:
-            self.advanced_view.show_success(path or "")
-            self.simple_view.show_success(path or "")
-            if self.tray and not self.isActiveWindow():
-                self.tray.show()
-                self.tray.showMessage(
-                    "VibeLoader",
-                    "Descarga lista.",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    4000,
-                )
-        self._last_completed_path = None
-
-    # ---------- Recientes ----------
-    def _remember_url(self, url: str):
-        if not url:
-            return
-        urls = [u for u in self.recent_urls if u != url]
-        urls.insert(0, url)
-        self.recent_urls = urls[:5]
-        save_recent_urls(self.settings, self.recent_urls)
-        self.simple_view.set_recents(self.recent_urls)
-
-    # ---------- Logging ----------
-    def _log_to_advanced(self, msg: str):
-        self.advanced_view.append_log(msg)
-        append_log_file(msg)
-
     # ---------- Cierre ----------
     def closeEvent(self, e):
         if self._job_running:
+            pendientes = f" y {len(self._queue)} en cola" if self._queue else ""
             r = QMessageBox.question(
                 self,
                 "Descarga en curso",
-                "Hay una descarga en curso. ¿Cancelarla y salir?",
+                f"Hay una descarga en curso{pendientes}. ¿Cancelar y salir?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if r != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
-            self._job_cancelled = True
-            if self.worker is not None:
-                self.worker.request_cancel()
+            self._cancel_job()
         stopped = self._stop_thread(self.thread, 15000) if self._job_running else True
+        for thread, _worker in list(self._retiring):
+            stopped = self._stop_thread(thread, 3000) and stopped
         stopped = self._stop_thread(self._meta_thread, 3000) and stopped
         if not stopped:
             # Un hilo sigue bloqueado en la red. Destruir un QThread en marcha

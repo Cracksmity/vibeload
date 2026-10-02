@@ -459,19 +459,26 @@ def build_convert_cmd(
     audio_kbps: int | None = None,
     pass_no: int | None = None,
     passlog: str | None = None,
+    subtitles=(),
 ) -> list:
     cmd = [ffmpeg_exe(), "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-y"]
-    if clip:
-        s, e = clip
+    s, e = clip if clip else (None, None)
+    subtitles = () if pass_no == 1 else tuple(subtitles or ())
+    # Entradas primero: -ss antes de cada -i (búsqueda rápida y exacta al
+    # recodificar; a los subtítulos se les aplica el mismo corrimiento).
+    for path in [src] + [p for p, _lang in subtitles]:
         if s:
-            cmd += ["-ss", f"{s:.3f}"]  # antes de -i: búsqueda rápida y exacta al recodificar
-        cmd += ["-i", src]
-        if e is not None:
-            cmd += ["-t", f"{e - (s or 0):.3f}"]
-    else:
-        cmd += ["-i", src]
+            cmd += ["-ss", f"{s:.3f}"]
+        cmd += ["-i", path]
+    # Opciones de salida (un -t antes de otro -i se aplicaría a esa entrada).
+    if e is not None:
+        cmd += ["-t", f"{e - (s or 0):.3f}"]
 
-    cmd += ["-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "0"]
+    cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
+    for i in range(len(subtitles)):
+        cmd += ["-map", f"{i + 1}:0"]
+    cmd += [] if subtitles else ["-sn"]
+    cmd += ["-dn", "-map_metadata", "0"]
 
     if plan.video_copy:
         cmd += ["-c:v", "copy"]
@@ -500,8 +507,52 @@ def build_convert_cmd(
         sr = profile.audio_sample_rate or (info.asample_rate if info.asample_rate in (44100, 48000) else 48000)
         cmd += ["-ar", str(sr), "-ac", "2"]
 
+    cmd += _subtitle_codec_args(subtitles, dst)
     cmd += ["-movflags", "+faststart", dst]
     return cmd
+
+
+SUB_LANG_ISO3 = {"es": "spa", "en": "eng", "pt": "por", "fr": "fra", "it": "ita", "de": "deu"}
+
+
+def _subtitle_codec_args(subtitles, dst) -> list:
+    if not subtitles:
+        return []
+    codec = "srt" if dst.lower().endswith(".mkv") else "mov_text"
+    a = ["-c:s", codec]
+    for i, (_p, lang) in enumerate(subtitles):
+        a += [f"-metadata:s:s:{i}", f"language={SUB_LANG_ISO3.get(lang, lang)}"]
+    return a
+
+
+def can_embed_subtitles(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in (".mp4", ".m4v", ".mov", ".mkv")
+
+
+def embed_subtitles(video, subtitles, *, clip=None, logger=print, cancel_event=None, proc_holder=None):
+    """Agrega pistas de subtítulos a un video ya descargado, sin recodificar."""
+    base, ext = os.path.splitext(video)
+    tmp = base + ".temp" + ext
+    cmd = [ffmpeg_exe(), "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-y", "-i", video]
+    s = clip[0] if clip else None
+    for path, _lang in subtitles:
+        if s:
+            cmd += ["-ss", f"{s:.3f}"]  # el video recortado empieza en s
+        cmd += ["-i", path]
+    cmd += ["-map", "0"]
+    for i in range(len(subtitles)):
+        cmd += ["-map", f"{i + 1}:0"]
+    cmd += ["-c", "copy"] + _subtitle_codec_args(subtitles, video) + ["-movflags", "+faststart", tmp]
+    try:
+        run_ffmpeg_cmd(
+            cmd, None, logger=logger, emit_progress=None, cancel_event=cancel_event,
+            proc_holder=proc_holder, pct_lo=0, pct_hi=100,
+        )
+        os.replace(tmp, video)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    logger(f"💬 Subtítulos incrustados: {', '.join(lang for _p, lang in subtitles)}")
 
 
 # ============================================================
@@ -628,6 +679,7 @@ def convert(
     clip=None,
     encoder_mode: str = "auto",
     target_mb: float | None = None,
+    subtitles=(),
     logger=print,
     emit_progress=None,
     cancel_event=None,
@@ -635,7 +687,10 @@ def convert(
     pct_lo=0,
     pct_hi=100,
 ):
-    """Convierte src → dst según el perfil. clip = (inicio, fin|None) en segundos."""
+    """Convierte src → dst según el perfil. clip = (inicio, fin|None) en segundos.
+
+    subtitles = [(ruta .srt, idioma)] se incrustan como pistas del MP4.
+    """
     logger(f"🎬 Procesando con ffmpeg ({profile.nice_name})…")
     info = probe_media(src)
     if not info.has_video and not info.has_audio:
@@ -652,13 +707,15 @@ def convert(
         proc_holder=proc_holder,
     )
 
+    kw["subtitles"] = tuple(subtitles or ())
     if target_mb:
         return _convert_target_size(src, dst, profile, info, clip, duration, target_mb, pct_lo, pct_hi, kw)
 
     plan = plan_conversion(profile, info, clip)
     encoder = None if plan.video_copy else pick_encoder(profile.codec, encoder_mode)
     logger(_describe(plan, encoder))
-    cmd = build_convert_cmd(src, dst, profile, plan, info, encoder=encoder, clip=clip)
+    subs = kw.pop("subtitles")
+    cmd = build_convert_cmd(src, dst, profile, plan, info, encoder=encoder, clip=clip, subtitles=subs)
     try:
         run_ffmpeg_cmd(cmd, duration, pct_lo=pct_lo, pct_hi=pct_hi, **kw)
     except FfmpegError:
@@ -667,19 +724,20 @@ def convert(
         logger(f"⚠️ Falló {encoder_label(encoder)}; reintentando con CPU…")
         mark_hw_broken(profile.codec)
         encoder = CPU_ENCODERS[profile.codec]
-        cmd = build_convert_cmd(src, dst, profile, plan, info, encoder=encoder, clip=clip)
+        cmd = build_convert_cmd(src, dst, profile, plan, info, encoder=encoder, clip=clip, subtitles=subs)
         run_ffmpeg_cmd(cmd, duration, pct_lo=pct_lo, pct_hi=pct_hi, **kw)
     logger(f"✅ Conversión terminada: {dst}")
 
 
 def _convert_target_size(src, dst, profile, info, clip, duration, target_mb, pct_lo, pct_hi, kw):
     logger = kw["logger"]
+    subs = kw.pop("subtitles", ())
     limit_bytes = target_mb * 1024 * 1024
 
     plan = plan_conversion(FFMPEG_PROFILE_WHATSAPP, info, clip)
     if not clip and plan.video_copy and plan.audio_copy and os.path.getsize(src) <= limit_bytes:
         logger(f"⚡ Ya pesa menos de {target_mb:g} MB y es compatible: se copia sin recodificar.")
-        cmd = build_convert_cmd(src, dst, profile, plan, info, clip=clip)
+        cmd = build_convert_cmd(src, dst, profile, plan, info, clip=clip, subtitles=subs)
         run_ffmpeg_cmd(cmd, duration, pct_lo=pct_lo, pct_hi=pct_hi, **kw)
         return
 
@@ -708,6 +766,7 @@ def _convert_target_size(src, dst, profile, info, clip, duration, target_mb, pct
         cmd2 = build_convert_cmd(
             src, dst, profile, plan, info, encoder="libx264", clip=clip,
             bitrate_k=video_k, audio_kbps=audio_k or None, pass_no=2, passlog=passlog,
+            subtitles=subs,
         )
         run_ffmpeg_cmd(cmd2, duration, pct_lo=mid, pct_hi=pct_hi, label="Comprimiendo (2/2)", **kw)
     finally:

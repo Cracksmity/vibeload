@@ -1,4 +1,5 @@
 """Vista simple: pegar enlace y elegir un botón."""
+import html
 import os
 import threading
 
@@ -31,6 +32,7 @@ class SimpleView(QWidget):
     request_fetch_metadata = Signal(str, int)
     request_open_advanced = Signal()
     request_open_folders = Signal()
+    request_open_history = Signal()
     request_toggle_theme = Signal()
     request_start = Signal(str, str)
     request_cancel = Signal()
@@ -67,6 +69,11 @@ class SimpleView(QWidget):
         self.theme_btn.setToolTip("Cambiar entre claro y oscuro")
         self.theme_btn.clicked.connect(self.request_toggle_theme)
         top.addWidget(self.theme_btn)
+        self.history_btn = QToolButton()
+        self.history_btn.setText("Historial")
+        self.history_btn.setToolTip("Tus últimas descargas")
+        self.history_btn.clicked.connect(self.request_open_history)
+        top.addWidget(self.history_btn)
         self.advanced_btn = QToolButton()
         self.advanced_btn.setText("Modo avanzado")
         self.advanced_btn.clicked.connect(self.request_open_advanced)
@@ -210,6 +217,9 @@ class SimpleView(QWidget):
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self.request_cancel)
         cancel_row = QHBoxLayout()
+        self.queue_label = QLabel("")
+        self.queue_label.setObjectName("FolderHint")
+        cancel_row.addWidget(self.queue_label)
         cancel_row.addStretch()
         cancel_row.addWidget(self.cancel_btn)
         layout.addLayout(cancel_row)
@@ -265,21 +275,13 @@ class SimpleView(QWidget):
 
     # ---------- Public API ----------
     def set_busy(self, busy: bool):
+        """Durante una descarga los botones siguen activos: lo nuevo va a la cola."""
         self._is_busy = busy
-        for b in (
-            self.btn_music,
-            self.btn_video,
-            self.btn_car,
-            self.btn_directo,
-            self.url_edit,
-            self.paste_btn,
-            self.change_folder_btn,
-            self.recents_btn,
-            self.advanced_btn,
-        ):
-            b.setEnabled(not busy)
+        self.change_folder_btn.setEnabled(not busy)
         self.progress.setVisible(busy)
         self.cancel_btn.setVisible(busy)
+        if not busy:
+            self.queue_label.setText("")
         if busy:
             self.result_card.setVisible(False)
             self.error_card.setVisible(False)
@@ -294,21 +296,21 @@ class SimpleView(QWidget):
         self.progress.setValue(pct)
         self.progress.setFormat(detail or f"{pct}%")
 
-    def show_success(self, file_path: str):
+    def set_queue_count(self, n: int):
+        self.queue_label.setText(f"En cola: {n}" if n else "")
+
+    def show_success(self, file_path: str, note: str = ""):
         self._last_result_path = file_path
+        extra = f"<br><span style='color:#888;'>{html.escape(note)}</span>" if note else ""
+        self.result_text.setTextFormat(Qt.TextFormat.RichText)
         if file_path:
-            short = file_path
-            try:
-                short = os.path.basename(file_path)
-            except Exception:
-                pass
             self.result_text.setText(
-                f"Listo. Tu archivo:\n<b>{short}</b><br>"
-                f"<span style='color:#888;'>Carpeta: {os.path.dirname(file_path)}</span>"
+                f"Listo. Tu archivo:<br><b>{html.escape(os.path.basename(file_path))}</b><br>"
+                f"<span style='color:#888;'>Carpeta: {html.escape(os.path.dirname(file_path))}</span>"
+                + extra
             )
-            self.result_text.setTextFormat(Qt.TextFormat.RichText)
         else:
-            self.result_text.setText("Listo.")
+            self.result_text.setText("Listo." + extra)
         self.result_card.setVisible(True)
         self.error_card.setVisible(False)
 
@@ -389,7 +391,7 @@ class SimpleView(QWidget):
         if data.get("is_playlist"):
             n = data.get("playlist_count") or 0
             meta.append(f"Lista de reproducción · {n} videos" if n else "Lista de reproducción")
-            meta.append("abre un video de la lista para descargarlo")
+            meta.append("elige un modo para escoger los videos")
         else:
             d = format_duration(data.get("duration"))
             if d:

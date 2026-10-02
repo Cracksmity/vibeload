@@ -117,6 +117,10 @@ def build_stylesheet(theme_name: str) -> str:
             border: 1px solid {t['error']};
             border-radius: 10px;
         }}
+        QFrame#card_success QLabel, QFrame#card_error QLabel,
+        QFrame#card_notice QLabel, QFrame#preview QLabel {{
+            background: transparent;
+        }}
         QFrame#card_notice {{
             background-color: {t['surface']};
             border: 1px solid {t['car']};

@@ -1,6 +1,8 @@
-"""Workers en hilos Qt: trabajo de descarga y extractor de metadatos."""
+"""Workers en hilos Qt: trabajo de descarga, metadatos y tareas sueltas."""
+import itertools
 import os
 import threading
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -14,13 +16,15 @@ from .config import (
     PRESET_TAMANO,
     PRESET_WHATSAPP,
 )
-from .errors import UserCancelledError
+from .errors import PlaylistNotSupportedError, UserCancelledError
 from .ffmpeg_core import (
     FFMPEG_PROFILE_CAR,
     FFMPEG_PROFILE_CURSOS,
     FFMPEG_PROFILE_TARGET,
     FFMPEG_PROFILE_WHATSAPP,
+    can_embed_subtitles,
     convert,
+    embed_subtitles,
 )
 from .logs import log_exception
 from .utils import FolderSnapshot, pick_auto_output_path, remove_files
@@ -32,6 +36,7 @@ from .ytdlp_core import (
     SPEC_MP3,
     clip_seconds,
     download,
+    download_subtitles,
     fetch_metadata,
 )
 
@@ -51,32 +56,56 @@ DIRECT_PRESETS = {
     PRESET_MP3: (SPEC_MP3, "✨ Listo. Audio MP3 listo."),
 }
 
+SUBS_NONE = "none"
+SUBS_SRT = "srt"
+SUBS_EMBED = "embed"
+
+
+@dataclass(frozen=True)
+class JobOptions:
+    encoder_mode: str = "auto"
+    target_mb: float = DEFAULT_TARGET_SIZE_MB
+    cookies_browser: str | None = None
+    subs_mode: str = SUBS_NONE
+    subs_langs: tuple = ("es",)
+
+
+_job_ids = itertools.count(1)
+
+
+@dataclass
+class Job:
+    """Un elemento de la cola."""
+
+    url: str
+    preset: str
+    folder: str
+    start: str = ""
+    end: str = ""
+    options: JobOptions = field(default_factory=JobOptions)
+    id: int = field(default_factory=lambda: next(_job_ids))
+    status: str = "en cola"  # en cola | descargando | listo | error | cancelado
+    title: str = ""
+    result_path: str = ""
+    from_simple: bool = False  # la carpeta sale de las predeterminadas de cada modo
+
 
 class Worker(QObject):
     finished = Signal()
     error = Signal(str)
     log = Signal(str)
     progress = Signal(int, str)
-    completed = Signal(str)
+    completed = Signal(str, str)  # ruta, título
+    playlist_detected = Signal(str)
 
-    def __init__(
-        self,
-        url,
-        carpeta_salida,
-        preset,
-        start_time,
-        end_time,
-        encoder_mode="auto",
-        target_mb=DEFAULT_TARGET_SIZE_MB,
-    ):
+    def __init__(self, url, carpeta_salida, preset, start_time, end_time, options: JobOptions | None = None):
         super().__init__()
-        self.encoder_mode = encoder_mode
-        self.target_mb = target_mb
         self.url = url
         self.carpeta_salida = carpeta_salida
         self.preset = preset
         self.start_time = start_time
         self.end_time = end_time
+        self.options = options or JobOptions()
         self._cancel_event = threading.Event()
         self._proc_holder = {}
         self._partial_outputs = []
@@ -97,23 +126,58 @@ class Worker(QObject):
     def _emit_progress(self, p, msg):
         self.progress.emit(max(0, min(100, int(p))), msg)
 
-    def _run_convert(self):
-        profile, spec, naming, done_msg = CONVERT_PRESETS[self.preset]
-        # El recorte lo hace ffmpeg en la misma pasada (una sola codificación).
-        res = download(
+    def _check_cancel(self):
+        if self._cancel_event.is_set():
+            raise UserCancelledError("Cancelado por el usuario")
+
+    def _download(self, spec, cut_with_ytdlp, pct_hi):
+        return download(
             self.url,
             self.carpeta_salida,
             spec,
             start_time=self.start_time,
             end_time=self.end_time,
-            cut_with_ytdlp=False,
+            cut_with_ytdlp=cut_with_ytdlp,
             logger=self._logger,
             cancel_event=self._cancel_event,
             emit_progress=self._emit_progress,
             pct_lo=0,
-            pct_hi=60,
+            pct_hi=pct_hi,
+            cookies_browser=self.options.cookies_browser,
         )
+
+    def _fetch_subtitles(self, pct):
+        if self.options.subs_mode == SUBS_NONE or self.preset == PRESET_MP3:
+            return []
+        self._check_cancel()
+        self._emit_progress(pct, "Bajando subtítulos…")
+        subs = download_subtitles(
+            self.url,
+            self.carpeta_salida,
+            list(self.options.subs_langs),
+            logger=self._logger,
+            cookies_browser=self.options.cookies_browser,
+        )
+        self._check_cancel()
+        return subs
+
+    def _place_srt_files(self, subs, video_path):
+        """Deja los .srt al lado del video: 'Video.es.srt', 'Video.en.srt'."""
+        base = os.path.splitext(video_path)[0]
+        for path, lang in subs:
+            dst = f"{base}.{lang}.srt"
+            try:
+                os.replace(path, dst)
+                self._logger(f"💬 Subtítulos guardados: {os.path.basename(dst)}")
+            except OSError as e:
+                self._logger(f"⚠️ No se pudo guardar {dst}: {e}")
+
+    def _run_convert(self):
+        profile, spec, naming, done_msg = CONVERT_PRESETS[self.preset]
+        # El recorte lo hace ffmpeg en la misma pasada (una sola codificación).
+        res = self._download(spec, cut_with_ytdlp=False, pct_hi=58)
         info = res.info
+        subs = self._fetch_subtitles(59)
         vid = str(info.get("id") or "video").strip()
         if naming == "id":
             output_file = os.path.join(self.carpeta_salida, f"{vid}.mp4")
@@ -122,13 +186,15 @@ class Worker(QObject):
             output_file = pick_auto_output_path(self.carpeta_salida, title, vid, res.path)
         if not os.path.exists(output_file):
             self._partial_outputs.append(output_file)
+        embed = bool(subs) and self.options.subs_mode == SUBS_EMBED
         convert(
             res.path,
             output_file,
             profile,
             clip=clip_seconds(self.start_time, self.end_time),
-            encoder_mode=self.encoder_mode,
-            target_mb=self.target_mb if self.preset == PRESET_TAMANO else None,
+            encoder_mode=self.options.encoder_mode,
+            target_mb=self.options.target_mb if self.preset == PRESET_TAMANO else None,
+            subtitles=subs if embed else (),
             logger=self._logger,
             emit_progress=self._emit_progress,
             cancel_event=self._cancel_event,
@@ -136,26 +202,33 @@ class Worker(QObject):
             pct_lo=61,
             pct_hi=99,
         )
+        if embed:
+            self._logger(f"💬 Subtítulos incrustados: {', '.join(lang for _p, lang in subs)}")
+        elif subs:
+            self._place_srt_files(subs, output_file)
         remove_files([res.path], self._logger)
         self._logger(done_msg)
-        return output_file
+        return output_file, info.get("title") or ""
 
     def _run_direct(self):
         spec, done_msg = DIRECT_PRESETS[self.preset]
-        res = download(
-            self.url,
-            self.carpeta_salida,
-            spec,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            logger=self._logger,
-            cancel_event=self._cancel_event,
-            emit_progress=self._emit_progress,
-            pct_lo=0,
-            pct_hi=95,
-        )
+        res = self._download(spec, cut_with_ytdlp=True, pct_hi=92)
+        subs = self._fetch_subtitles(93)
+        if subs:
+            if self.options.subs_mode == SUBS_EMBED and can_embed_subtitles(res.path):
+                self._emit_progress(96, "Incrustando subtítulos…")
+                embed_subtitles(
+                    res.path,
+                    subs,
+                    clip=clip_seconds(self.start_time, self.end_time),
+                    logger=self._logger,
+                    cancel_event=self._cancel_event,
+                    proc_holder=self._proc_holder,
+                )
+            else:
+                self._place_srt_files(subs, res.path)
         self._logger(done_msg)
-        return res.path
+        return res.path, res.info.get("title") or ""
 
     @Slot()
     def run(self):
@@ -169,20 +242,23 @@ class Worker(QObject):
             snapshot = FolderSnapshot(self.carpeta_salida)
 
             if self.preset in CONVERT_PRESETS:
-                result_path = self._run_convert()
+                result_path, title = self._run_convert()
             elif self.preset in DIRECT_PRESETS:
-                result_path = self._run_direct()
+                result_path, title = self._run_direct()
             else:
                 raise ValueError(f"Preset no reconocido: {self.preset}")
 
             remove_files(snapshot.leftovers_after_success(result_path), self._logger)
             self._emit_progress(100, "Listo")
-            self.completed.emit(result_path)
+            self.completed.emit(result_path, title)
 
         except UserCancelledError as e:
             self._logger("⏹️ " + str(e))
             self.progress.emit(0, "Cancelado")
             self._cleanup_failure(snapshot)
+        except PlaylistNotSupportedError as e:
+            self._logger("📃 " + str(e))
+            self.playlist_detected.emit(self.url)
         except Exception as e:
             log_exception(f"Error en el trabajo ({self.preset}) {self.url}")
             self._cleanup_failure(snapshot)
@@ -208,13 +284,14 @@ class MetadataFetcher(QObject):
         # Lo escribe el hilo de la GUI antes de pedir; si llegaron varios pedidos
         # seguidos (el usuario pegó varios enlaces), solo se procesa el último.
         self.latest_token = 0
+        self.cookies_browser = None
 
     @Slot(str, int)
     def fetch(self, url: str, token: int):
         if not url or token != self.latest_token:
             return
         try:
-            data = fetch_metadata(url, logger=self.log.emit)
+            data = fetch_metadata(url, logger=self.log.emit, cookies_browser=self.cookies_browser)
         except Exception as e:
             self.failed.emit(str(e), token)
             return

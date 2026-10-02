@@ -4,7 +4,7 @@ import re
 import shutil
 
 _INTERMEDIATE_RE = re.compile(
-    r"(\.vlsrc\.|\.temp\.|\.part$|\.part-frag|\.ytdl$|\.f[\w-]+\.(mp4|webm|m4a|mkv|mp3|opus|ogg|aac|flac|wav)$)",
+    r"(\.vlsrc\.|\.vlsub\.|\.temp\.|\.part$|\.part-frag|\.ytdl$|\.f[\w-]+\.(mp4|webm|m4a|mkv|mp3|opus|ogg|aac|flac|wav)$)",
     re.IGNORECASE,
 )
 _THUMB_EXTS = (".webp", ".jpg", ".jpeg", ".png")

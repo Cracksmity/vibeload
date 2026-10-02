@@ -1,5 +1,6 @@
 """Todo lo que habla con yt-dlp: opciones, descarga y metadatos."""
 import os
+import re
 from dataclasses import dataclass, field
 
 from .config import META_YTDLP_IMPERSONATE
@@ -162,7 +163,7 @@ class _YdlLogger:
             self._log("❌ yt-dlp: " + msg)
 
 
-def base_ydl_opts(url: str, logger=None, verbose: bool = True) -> dict:
+def base_ydl_opts(url: str, logger=None, verbose: bool = True, cookies_browser: str | None = None) -> dict:
     opts = {
         "noplaylist": True,
         "noprogress": True,
@@ -172,6 +173,9 @@ def base_ydl_opts(url: str, logger=None, verbose: bool = True) -> dict:
     ff = ffmpeg_location_for_ytdlp()
     if ff:
         opts["ffmpeg_location"] = ff
+    if cookies_browser:
+        # Sesión del navegador: videos con restricción de edad / "no eres un bot".
+        opts["cookiesfrombrowser"] = (cookies_browser,)
     _merge_meta_impersonate_ytdlp_opts(url, opts)
     _merge_youtube_opts(url, opts)
     return opts
@@ -387,8 +391,8 @@ def _final_filepath(ydl, info: dict) -> str:
     return ydl.prepare_filename(info)
 
 
-def build_download_opts(url, folder, spec: DownloadSpec, logger, hooks=(), pp_hooks=()):
-    opts = base_ydl_opts(url, logger)
+def build_download_opts(url, folder, spec: DownloadSpec, logger, hooks=(), pp_hooks=(), cookies_browser=None):
+    opts = base_ydl_opts(url, logger, cookies_browser=cookies_browser)
     opts["outtmpl"] = os.path.join(folder, spec.outtmpl)
     opts["format"] = spec.format
     if spec.format_sort:
@@ -421,6 +425,7 @@ def download(
     emit_progress=None,
     pct_lo=0,
     pct_hi=95,
+    cookies_browser=None,
 ) -> DownloadResult:
     """Descarga con un solo paso de extracción.
 
@@ -439,6 +444,7 @@ def download(
         logger,
         hooks=[make_ydl_progress_hook(cancel_event, pct_lo, pct_hi, emit_progress)],
         pp_hooks=[make_pp_hook(cancel_event, pct_hi, emit_progress)],
+        cookies_browser=cookies_browser,
     )
     clip = clip_seconds(start_time, end_time)
     if clip and cut_with_ytdlp:
@@ -469,9 +475,20 @@ def download(
 # ============================================================
 
 
-def fetch_metadata(url: str, logger=None) -> dict:
+PLAYLIST_ENTRIES_LIMIT = 1000
+
+
+def _entry_url(e: dict) -> str | None:
+    for key in ("webpage_url", "url"):
+        u = e.get(key)
+        if isinstance(u, str) and u.startswith(("http://", "https://")):
+            return u
+    return None
+
+
+def fetch_metadata(url: str, logger=None, cookies_browser=None) -> dict:
     """Info para la vista previa. Las playlists se leen en modo plano (sin abrir cada video)."""
-    opts = base_ydl_opts(url, logger, verbose=False)
+    opts = base_ydl_opts(url, logger, verbose=False, cookies_browser=cookies_browser)
     opts["skip_download"] = True
     opts["extract_flat"] = "in_playlist"
 
@@ -491,5 +508,84 @@ def fetch_metadata(url: str, logger=None) -> dict:
         "thumbnail_urls": collect_thumbnail_urls(info),
         "is_playlist": is_pl,
         "playlist_count": info.get("playlist_count") or len(entries),
+        "entries": [
+            {"title": e.get("title") or "", "url": _entry_url(e), "duration": e.get("duration")}
+            for e in entries[:PLAYLIST_ENTRIES_LIMIT]
+            if isinstance(e, dict) and _entry_url(e)
+        ],
         "url": url,
     }
+
+
+# ============================================================
+# SUBTÍTULOS
+# ============================================================
+
+def pick_subtitle_codes(manual: dict, auto: dict, langs) -> dict:
+    """Un código por idioma pedido: {lang: (código, es_automático)}.
+
+    Orden: manual exacto ("es") > manual regional ("es-419") > automático en el
+    idioma original del video ("es-orig") > automático exacto (traducción).
+    Pedir una sola variante evita el 429 de YouTube por bajar decenas.
+    """
+    manual = manual or {}
+    auto = auto or {}
+    out = {}
+    for lang in langs:
+        regional = sorted(k for k in manual if k.lower().startswith(lang + "-"))
+        if lang in manual:
+            out[lang] = (lang, False)
+        elif regional:
+            out[lang] = (regional[0], False)
+        elif f"{lang}-orig" in auto:
+            out[lang] = (f"{lang}-orig", True)
+        elif lang in auto:
+            out[lang] = (lang, True)
+    return out
+
+
+def download_subtitles(url, folder, langs, logger=print, cookies_browser=None) -> list:
+    """Baja subtítulos (manuales o automáticos) como .srt en una pasada aparte.
+
+    Va separado de la descarga principal: si YouTube responde 429 a los
+    subtítulos, solo se avisa y el video sigue. Devuelve [(ruta, idioma)].
+    """
+    if not langs:
+        return []
+    opts = base_ydl_opts(url, logger, verbose=False, cookies_browser=cookies_browser)
+    opts.update(
+        {
+            "skip_download": True,
+            "subtitlesformat": "srt/vtt/best",
+            "postprocessors": [{"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"}],
+            "outtmpl": os.path.join(folder, "%(id)s.vlsub.%(ext)s"),
+            "restrictfilenames": True,
+        }
+    )
+
+    def work(ydl):
+        ie = _resolve_url_results(ydl, ydl.extract_info(url, download=False, process=False))
+        chosen = pick_subtitle_codes(ie.get("subtitles"), ie.get("automatic_captions"), langs)
+        if not chosen:
+            return ie.get("id"), {}
+        ydl.params["writesubtitles"] = any(not a for _c, a in chosen.values())
+        ydl.params["writeautomaticsub"] = any(a for _c, a in chosen.values())
+        ydl.params["subtitleslangs"] = [re.escape(c) for c, _a in chosen.values()]
+        ydl.process_ie_result(ie, download=True)
+        return ie.get("id"), chosen
+
+    try:
+        vid, chosen = _with_ydl(opts, logger, work)
+    except Exception as e:
+        logger(f"⚠️ No se pudieron bajar los subtítulos: {str(e).splitlines()[0][:200]}")
+        return []
+    out = []
+    for lang in langs:
+        if lang not in chosen:
+            continue
+        path = os.path.join(folder, f"{vid}.vlsub.{chosen[lang][0]}.srt")
+        if os.path.exists(path):
+            out.append((path, lang))
+    if not out:
+        logger("ℹ️ Este video no tiene subtítulos en los idiomas elegidos.")
+    return out

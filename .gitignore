@@ -18,3 +18,7 @@ dist/
 
 # Archivos temporales
 *.log
+
+# Entorno virtual con punto
+.venv/
+.pytest_cache/

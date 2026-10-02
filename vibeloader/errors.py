@@ -90,3 +90,15 @@ class UserCancelledError(Exception):
 
 class ClipTimestampError(Exception):
     """Marcas de tiempo de recorte fuera del rango del video."""
+
+
+class PlaylistNotSupportedError(Exception):
+    """El enlace es una lista de reproducción y el modo elegido baja un solo video."""
+
+    def __init__(self, title: str = ""):
+        self.title = title
+        nombre = f" «{title}»" if title else ""
+        super().__init__(
+            f"Este enlace es una lista de reproducción{nombre}. "
+            "Abre un video de la lista y copia su enlace."
+        )

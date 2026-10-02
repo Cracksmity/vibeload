@@ -3,6 +3,75 @@ import os
 import re
 import shutil
 
+_INTERMEDIATE_RE = re.compile(
+    r"(\.vlsrc\.|\.temp\.|\.part$|\.part-frag|\.ytdl$|\.f[\w-]+\.(mp4|webm|m4a|mkv|mp3|opus|ogg|aac|flac|wav)$)",
+    re.IGNORECASE,
+)
+_THUMB_EXTS = (".webp", ".jpg", ".jpeg", ".png")
+
+
+class FolderSnapshot:
+    """Recuerda qué había en una carpeta para borrar SOLO lo que creó el trabajo.
+
+    Nunca se borra un archivo que ya existía antes de empezar (p. ej. un .flac
+    del usuario con el mismo nombre que la canción descargada).
+    """
+
+    def __init__(self, folder: str):
+        self.folder = folder
+        self.before = self._names()
+
+    def _names(self) -> set:
+        try:
+            return set(os.listdir(self.folder))
+        except OSError:
+            return set()
+
+    def new_files(self) -> list:
+        out = []
+        for name in sorted(self._names() - self.before):
+            p = os.path.join(self.folder, name)
+            if os.path.isfile(p):
+                out.append(p)
+        return out
+
+    def leftovers_after_success(self, result_path: str | None) -> list:
+        """Intermedios y portadas sueltas creados por el trabajo (no el resultado)."""
+        res = os.path.normcase(os.path.abspath(result_path)) if result_path else None
+        res_base = os.path.splitext(res)[0] if res else None
+        out = []
+        for p in self.new_files():
+            ap = os.path.normcase(os.path.abspath(p))
+            if ap == res:
+                continue
+            base, ext = os.path.splitext(ap)
+            if _INTERMEDIATE_RE.search(os.path.basename(p)) or (
+                res_base and base == res_base and ext.lower() in _THUMB_EXTS
+            ):
+                out.append(p)
+        return out
+
+    def leftovers_after_failure(self, partial_outputs=()) -> list:
+        """Intermedios creados por el trabajo + salidas a medias que antes no existían."""
+        partial = {os.path.normcase(os.path.abspath(p)) for p in partial_outputs if p}
+        out = []
+        for p in self.new_files():
+            ap = os.path.normcase(os.path.abspath(p))
+            if ap in partial or _INTERMEDIATE_RE.search(os.path.basename(p)):
+                out.append(p)
+        return out
+
+
+def remove_files(paths, logger):
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                logger(f"🧹 Borrado archivo temporal: {os.path.basename(p)}")
+        except OSError as e:
+            logger(f"⚠️ No se pudo borrar {p}: {e}")
+
+
 def check_tool(tool_name):
     return shutil.which(tool_name) is not None
 

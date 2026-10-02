@@ -1,5 +1,5 @@
-yt-dlp>=2024.1.0
-# yt-dlp solo soporta curl-cffi 0.5.10 y 0.10.x a 0.14.x.
-# En tu caso se instaló 0.15.0, y por eso el target de impersonation queda "no disponible".
-curl-cffi>=0.14.0,<0.15.0
+# [default] trae yt-dlp-ejs (necesario para resolver los retos JS de YouTube),
+# mutagen, brotli, websockets, etc. [curl-cffi] instala la versión de curl_cffi
+# que yt-dlp soporta para la huella TLS (impersonate) que usan Facebook/Instagram.
+yt-dlp[default,curl-cffi]>=2026.8.19
 PySide6>=6.5.0

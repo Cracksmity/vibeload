@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
 
         self._meta.fetched.connect(self.simple_view.on_metadata)
         self._meta.failed.connect(self.simple_view.on_metadata_failed)
+        self._meta.log.connect(append_log_file)
 
         # Theme & arranque
         self._apply_theme()

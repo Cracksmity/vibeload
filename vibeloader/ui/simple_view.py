@@ -354,9 +354,14 @@ class SimpleView(QWidget):
         meta = []
         if data.get("channel"):
             meta.append(data["channel"])
-        d = format_duration(data.get("duration"))
-        if d:
-            meta.append(d)
+        if data.get("is_playlist"):
+            n = data.get("playlist_count") or 0
+            meta.append(f"Lista de reproducción · {n} videos" if n else "Lista de reproducción")
+            meta.append("abre un video de la lista para descargarlo")
+        else:
+            d = format_duration(data.get("duration"))
+            if d:
+                meta.append(d)
         self.preview_meta.setText(" · ".join(meta))
         urls = data.get("thumbnail_urls") or []
         if not urls and data.get("thumbnail"):
